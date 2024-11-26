@@ -7,6 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { driver as createDriver, auth, Node as Neo4jNode, Relationship as Neo4jRelationship } from 'neo4j-driver';
+import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   ExecuteCypherSchema,
@@ -16,8 +17,12 @@ import {
   NodeSchema,
   RelationshipSchema,
   PathSchema,
+  FindPathSchema,
   NodePropertiesSchema,
-  RelationshipPropertiesSchema
+  RelationshipPropertiesSchema,
+  type Node,
+  type Relationship,
+  type Path
 } from './schemas.js';
 
 // Initialize server
@@ -29,14 +34,14 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
-    },
+    }
   }
 );
 
 // Initialize Neo4j connection
 const uri = process.env.NEO4J_URI || 'bolt://localhost:7687';
 const username = process.env.NEO4J_USERNAME || 'neo4j';
-const password = process.env.NEO4J_PASSWORD;
+const password = process.env.NEO4J_PASSWORD || 'testpassword';
 const database = process.env.NEO4J_DATABASE || 'neo4j';
 
 if (!password) {
@@ -52,22 +57,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "execute_cypher",
       description: "Execute a Cypher query against the Neo4j database",
-      inputSchema: zodToJsonSchema(ExecuteCypherSchema)
+      schema: zodToJsonSchema(ExecuteCypherSchema)
     },
     {
       name: "create_node",
       description: "Create a new node with labels and properties",
-      inputSchema: zodToJsonSchema(CreateNodeSchema)
+      schema: zodToJsonSchema(CreateNodeSchema)
     },
     {
       name: "create_relationship",
       description: "Create a relationship between two nodes",
-      inputSchema: zodToJsonSchema(CreateRelationshipSchema)
+      schema: zodToJsonSchema(CreateRelationshipSchema)
     },
     {
       name: "get_neighbors",
       description: "Get neighboring nodes of a given node",
-      inputSchema: zodToJsonSchema(GetNeighborsSchema)
+      schema: zodToJsonSchema(GetNeighborsSchema)
+    },
+    {
+      name: "find_path",
+      description: "Find paths between two nodes",
+      schema: zodToJsonSchema(FindPathSchema)
     }
   ]
 }));
@@ -80,129 +90,171 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     switch (name) {
       case "execute_cypher": {
-        const params = ExecuteCypherSchema.parse(args);
-        const result = await session.run(params.query, params.params);
+        const params = ExecuteCypherSchema.parse(args) as z.infer<typeof ExecuteCypherSchema>;
+        const result = await session.run(params.query, params.parameters || {});
         
         // Improved type handling for query results
-        return {
-          toolResult: result.records.map(record => {
-            const resultObj: Record<string, unknown> = {};
-            // Convert keys to string array before using them
-            const keys = record.keys as string[];
-            for (const key of keys) {
-              const value = record.get(key);
-              // Handle Neo4j node and relationship types
-              if (value instanceof Neo4jNode) {
-                resultObj[key] = NodeSchema.parse({
-                  id: value.elementId,
-                  labels: Array.from(value.labels),
-                  properties: NodePropertiesSchema.parse(value.properties)
-                });
-              } else if (value instanceof Neo4jRelationship) {
-                resultObj[key] = RelationshipSchema.parse({
-                  id: value.elementId,
-                  type: value.type,
-                  fromNode: value.startNodeElementId,
-                  toNode: value.endNodeElementId,
-                  properties: RelationshipPropertiesSchema.parse(value.properties)
-                });
-              } else {
-                resultObj[key] = value;
-              }
+        const toolResult: Record<string, Node | Relationship | unknown> = {};
+        result.records.forEach(record => {
+          const keys = record.keys as string[];
+          for (const key of keys) {
+            const value = record.get(key);
+            if (value instanceof Neo4jNode) {
+              toolResult[key] = NodeSchema.parse({
+                id: value.elementId,
+                labels: Array.from(value.labels),
+                properties: value.properties
+              });
+            } else if (value instanceof Neo4jRelationship) {
+              toolResult[key] = RelationshipSchema.parse({
+                id: value.elementId,
+                type: value.type,
+                fromNode: value.startNodeElementId,
+                toNode: value.endNodeElementId,
+                properties: value.properties
+              });
+            } else {
+              toolResult[key] = value;
             }
-            return resultObj;
-          })
-        };
+          }
+        });
+        return { toolResult };
       }
 
       case "create_node": {
-        const { labels, properties } = CreateNodeSchema.parse(args);
-        // Validate properties against the schema before creating the node
+        const params = CreateNodeSchema.parse(args) as z.infer<typeof CreateNodeSchema>;
+        const { labels, properties } = params;
+        
+        // Validate properties against the schema
         NodePropertiesSchema.parse(properties);
         
-        const labelStr = labels.map(l => `:${l}`).join('');
-        const propsStr = Object.entries(properties)
-          .map(([k, v]) => `${k}: $${k}`)
-          .join(', ');
-
-        const query = `CREATE (n${labelStr} {${propsStr}}) RETURN n`;
-        const result = await session.run(query, properties);
-        const node = result.records[0].get('n');
-        
-        return { toolResult: NodeSchema.parse({
-          id: node.elementId,
-          labels: Array.from(node.labels),
-          properties: NodePropertiesSchema.parse(node.properties)
-        })};
+        const result = await session.executeWrite(async (tx): Promise<{ toolResult: Node }> => {
+          const labelStr = labels.map(l => `:${l}`).join('');
+          const query = `
+            CREATE (n${labelStr})
+            SET n = $properties
+            RETURN n
+          `;
+          const result = await tx.run(query, { properties });
+          const node = result.records[0].get('n');
+          
+          return { toolResult: NodeSchema.parse({
+            id: node.elementId,
+            labels: Array.from(node.labels),
+            properties: NodePropertiesSchema.parse(node.properties)
+          })};
+        });
+        return result;
       }
 
       case "create_relationship": {
-        const { fromNode, toNode, type, properties = {} } = CreateRelationshipSchema.parse(args);
-        // Validate properties against the schema before creating the relationship
-        if (properties) {
-          RelationshipPropertiesSchema.parse(properties);
-        }
-
-        const propsStr = Object.entries(properties)
-          .map(([k, v]) => `${k}: $${k}`)
-          .join(', ');
-
-        const query = `
-          MATCH (from), (to)
-          WHERE elementId(from) = $fromId AND elementId(to) = $toId
-          CREATE (from)-[r:${type} {${propsStr}}]->(to)
-          RETURN r
-        `;
-
-        const result = await session.run(query, {
-          fromId: fromNode,
-          toId: toNode,
-          ...properties
+        const params = CreateRelationshipSchema.parse(args) as z.infer<typeof CreateRelationshipSchema>;
+        const { startNodeId, endNodeId, type, properties = {} } = params;
+        
+        // Validate properties against the schema
+        RelationshipPropertiesSchema.parse(properties);
+        
+        const result = await session.executeWrite(async (tx): Promise<{ toolResult: Relationship }> => {
+          const query = `
+            MATCH (from), (to)
+            WHERE ID(from) = $startNodeId AND ID(to) = $endNodeId
+            CREATE (from)-[r:${type} $properties]->(to)
+            RETURN r
+          `;
+          const result = await tx.run(query, { startNodeId, endNodeId, properties });
+          const rel = result.records[0].get('r');
+          
+          return { toolResult: RelationshipSchema.parse({
+            id: rel.elementId,
+            type: rel.type,
+            fromNode: rel.startNodeElementId,
+            toNode: rel.endNodeElementId,
+            properties: RelationshipPropertiesSchema.parse(rel.properties)
+          })};
         });
+        return result;
+      }
 
-        const rel = result.records[0].get('r');
-        return { toolResult: RelationshipSchema.parse({
-          id: rel.elementId,
-          type: rel.type,
-          fromNode: rel.startNodeElementId,
-          toNode: rel.endNodeElementId,
-          properties: properties ? RelationshipPropertiesSchema.parse(rel.properties) : {}
-        })};
+      case "find_path": {
+        const params = FindPathSchema.parse(args) as z.infer<typeof FindPathSchema>;
+        const { startNodeId, endNodeId, maxDepth = 4, relationshipTypes } = params;
+        
+        const result = await session.executeWrite(async (tx): Promise<{ toolResult: Path | null }> => {
+          const relationshipTypesClause = relationshipTypes?.length
+            ? `:${relationshipTypes.join('|')}`
+            : '';
+          const query = `
+            MATCH path = shortestPath((from)-[${relationshipTypesClause}*..${maxDepth}]-(to))
+            WHERE ID(from) = $startNodeId AND ID(to) = $endNodeId
+            RETURN path
+          `;
+          const result = await tx.run(query, { startNodeId, endNodeId });
+          
+          if (result.records.length === 0) {
+            return { toolResult: null };
+          }
+
+          const path = result.records[0].get('path');
+          return { toolResult: PathSchema.parse({
+            nodes: path.segments.map((segment: any) => ({
+              id: segment.start.elementId,
+              labels: Array.from(segment.start.labels),
+              properties: segment.start.properties
+            })).concat([{
+              id: path.end.elementId,
+              labels: Array.from(path.end.labels),
+              properties: path.end.properties
+            }]),
+            relationships: path.segments.map((segment: any) => ({
+              id: segment.relationship.elementId,
+              type: segment.relationship.type,
+              fromNode: segment.start.elementId,
+              toNode: segment.end.elementId,
+              properties: segment.relationship.properties
+            }))
+          })};
+        });
+        return result;
       }
 
       case "get_neighbors": {
-        const { nodeId, direction, relationshipTypes = [], limit } = GetNeighborsSchema.parse(args);
-        const relTypeStr = relationshipTypes.length
-          ? `:${relationshipTypes.join('|')}`
-          : '';
+        const params = GetNeighborsSchema.parse(args) as z.infer<typeof GetNeighborsSchema>;
+        const { nodeId, direction = 'both', relationshipTypes = [], labels = [] } = params;
+        
+        const result = await session.executeWrite(async (tx): Promise<{ toolResult: { nodes: Node[], relationships: Relationship[] } }> => {
+          const relationshipPattern = relationshipTypes.length ? `:${relationshipTypes.join('|')}` : '';
+          const labelPattern = labels.length ? `:${labels.join('|')}` : '';
+          const query = direction === 'both'
+            ? `MATCH (n)-[r${relationshipPattern}]-(m${labelPattern}) WHERE ID(n) = $nodeId RETURN m, r`
+            : direction === 'outgoing'
+              ? `MATCH (n)-[r${relationshipPattern}]->(m${labelPattern}) WHERE ID(n) = $nodeId RETURN m, r`
+              : `MATCH (n)<-[r${relationshipPattern}]-(m${labelPattern}) WHERE ID(n) = $nodeId RETURN m, r`;
 
-        let pattern: string;
-        if (direction === 'incoming') {
-          pattern = `(neighbor)-[${relTypeStr}]->(n)`;
-        } else if (direction === 'outgoing') {
-          pattern = `(n)-[${relTypeStr}]->(neighbor)`;
-        } else {
-          pattern = `(n)-[${relTypeStr}]-(neighbor)`;
-        }
-
-        const query = `
-          MATCH ${pattern}
-          WHERE elementId(n) = $nodeId
-          RETURN DISTINCT neighbor
-          ${limit ? `LIMIT ${limit}` : ''}
-        `;
-
-        const result = await session.run(query, { nodeId });
-        return { 
-          toolResult: result.records.map(record => {
-            const node = record.get('neighbor');
-            return NodeSchema.parse({
-              id: node.elementId,
-              labels: Array.from(node.labels),
-              properties: NodePropertiesSchema.parse(node.properties)
-            });
-          })
-        };
+          const result = await tx.run(query, { nodeId });
+          return {
+            toolResult: {
+              nodes: result.records.map(record => {
+                const node = record.get('m');
+                return NodeSchema.parse({
+                  id: node.elementId,
+                  labels: Array.from(node.labels),
+                  properties: node.properties
+                });
+              }),
+              relationships: result.records.map(record => {
+                const rel = record.get('r');
+                return RelationshipSchema.parse({
+                  id: rel.elementId,
+                  type: rel.type,
+                  fromNode: rel.startNodeElementId,
+                  toNode: rel.endNodeElementId,
+                  properties: rel.properties
+                });
+              })
+            }
+          };
+        });
+        return result;
       }
 
       default:
@@ -222,9 +274,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Start server
 async function main() {
   try {
-    // Verify Neo4j connection
-    await driver.verifyConnectivity();
-    console.error('Successfully connected to Neo4j');
+    // Verify connection is valid
+    await driver.getServerInfo();
+    console.log('Connected to Neo4j');
 
     // Start server
     const transport = new StdioServerTransport();
