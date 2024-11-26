@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { driver as createDriver, auth } from 'neo4j-driver';
+import { driver as createDriver, auth, Node as Neo4jNode, Relationship as Neo4jRelationship } from 'neo4j-driver';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   ExecuteCypherSchema,
@@ -15,7 +15,9 @@ import {
   GetNeighborsSchema,
   NodeSchema,
   RelationshipSchema,
-  PathSchema
+  PathSchema,
+  NodePropertiesSchema,
+  RelationshipPropertiesSchema
 } from './schemas.js';
 
 // Initialize server
@@ -81,12 +83,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = ExecuteCypherSchema.parse(args);
         const result = await session.run(params.query, params.params);
         
+        // Improved type handling for query results
         return {
           toolResult: result.records.map(record => {
-            const resultObj: { [key: string]: any } = {};
-            const keys = Array.from(record.keys);
+            const resultObj: Record<string, unknown> = {};
+            // Convert keys to string array before using them
+            const keys = record.keys as string[];
             for (const key of keys) {
-              resultObj[String(key)] = record.get(key);
+              const value = record.get(key);
+              // Handle Neo4j node and relationship types
+              if (value instanceof Neo4jNode) {
+                resultObj[key] = NodeSchema.parse({
+                  id: value.elementId,
+                  labels: Array.from(value.labels),
+                  properties: NodePropertiesSchema.parse(value.properties)
+                });
+              } else if (value instanceof Neo4jRelationship) {
+                resultObj[key] = RelationshipSchema.parse({
+                  id: value.elementId,
+                  type: value.type,
+                  fromNode: value.startNodeElementId,
+                  toNode: value.endNodeElementId,
+                  properties: RelationshipPropertiesSchema.parse(value.properties)
+                });
+              } else {
+                resultObj[key] = value;
+              }
             }
             return resultObj;
           })
@@ -95,6 +117,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "create_node": {
         const { labels, properties } = CreateNodeSchema.parse(args);
+        // Validate properties against the schema before creating the node
+        NodePropertiesSchema.parse(properties);
+        
         const labelStr = labels.map(l => `:${l}`).join('');
         const propsStr = Object.entries(properties)
           .map(([k, v]) => `${k}: $${k}`)
@@ -107,12 +132,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { toolResult: NodeSchema.parse({
           id: node.elementId,
           labels: Array.from(node.labels),
-          properties: node.properties
+          properties: NodePropertiesSchema.parse(node.properties)
         })};
       }
 
       case "create_relationship": {
         const { fromNode, toNode, type, properties = {} } = CreateRelationshipSchema.parse(args);
+        // Validate properties against the schema before creating the relationship
+        if (properties) {
+          RelationshipPropertiesSchema.parse(properties);
+        }
+
         const propsStr = Object.entries(properties)
           .map(([k, v]) => `${k}: $${k}`)
           .join(', ');
@@ -136,7 +166,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: rel.type,
           fromNode: rel.startNodeElementId,
           toNode: rel.endNodeElementId,
-          properties: rel.properties
+          properties: properties ? RelationshipPropertiesSchema.parse(rel.properties) : {}
         })};
       }
 
@@ -169,7 +199,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return NodeSchema.parse({
               id: node.elementId,
               labels: Array.from(node.labels),
-              properties: node.properties
+              properties: NodePropertiesSchema.parse(node.properties)
             });
           })
         };
