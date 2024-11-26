@@ -6,26 +6,55 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-
-import { Neo4jClient } from './client.js';
-import {
-  ExecuteCypherSchema,
-  CreateNodeSchema,
-  CreateRelationshipSchema,
-  FindPathSchema,
-  GetNeighborsSchema,
-  type ExecuteCypherInput,
-  type CreateNodeInput,
-  type CreateRelationshipInput,
-  type FindPathInput,
-  type GetNeighborsInput
-} from './schemas.js';
+import neo4j from 'neo4j-driver';
+import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
-// Initialize Neo4j client
-const client = new Neo4jClient();
+// Schema definitions
+const NodeSchema = z.object({
+  id: z.string(),
+  labels: z.array(z.string()),
+  properties: z.record(z.unknown())
+});
 
-// Create MCP server
+const RelationshipSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  fromNode: z.string(),
+  toNode: z.string(),
+  properties: z.record(z.unknown())
+});
+
+const PathSchema = z.object({
+  nodes: z.array(NodeSchema),
+  relationships: z.array(RelationshipSchema)
+});
+
+const ExecuteCypherSchema = z.object({
+  query: z.string().min(1).describe("Cypher query to execute"),
+  params: z.record(z.unknown()).optional().describe("Optional query parameters")
+});
+
+const CreateNodeSchema = z.object({
+  labels: z.array(z.string()).min(1).describe("Node labels"),
+  properties: z.record(z.unknown()).describe("Node properties")
+});
+
+const CreateRelationshipSchema = z.object({
+  fromNode: z.string().describe("ID or reference of the source node"),
+  toNode: z.string().describe("ID or reference of the target node"),
+  type: z.string().describe("Relationship type"),
+  properties: z.record(z.unknown()).optional().describe("Optional relationship properties")
+});
+
+const GetNeighborsSchema = z.object({
+  nodeId: z.string().describe("Node ID or reference"),
+  direction: z.enum(['incoming', 'outgoing', 'both']).default('both').describe("Direction of relationships"),
+  relationshipTypes: z.array(z.string()).optional().describe("Filter by relationship types"),
+  limit: z.number().optional().describe("Maximum number of neighbors to return")
+});
+
+// Initialize server
 const server = new Server(
   {
     name: "neo4j-mcp-server",
@@ -38,7 +67,43 @@ const server = new Server(
   }
 );
 
-// List available tools
+// Initialize Neo4j connection
+const uri = process.env.NEO4J_URI || 'bolt://localhost:7687';
+const username = process.env.NEO4J_USERNAME || 'neo4j';
+const password = process.env.NEO4J_PASSWORD;
+const database = process.env.NEO4J_DATABASE || 'neo4j';
+
+if (!password) {
+  console.error("NEO4J_PASSWORD environment variable is required");
+  process.exit(1);
+}
+
+const driver = neo4j.driver(uri, neo4j.auth.basic(username, password));
+
+// Helper functions for type conversion
+function convertNode(node: neo4j.Node) {
+  return {
+    id: node.elementId,
+    labels: Array.from(node.labels),
+    properties: Object.fromEntries(
+      Object.entries(node.properties).map(([k, v]) => [k, v])
+    )
+  };
+}
+
+function convertRelationship(rel: neo4j.Relationship) {
+  return {
+    id: rel.elementId,
+    type: rel.type,
+    fromNode: rel.startNodeElementId,
+    toNode: rel.endNodeElementId,
+    properties: Object.fromEntries(
+      Object.entries(rel.properties).map(([k, v]) => [k, v])
+    )
+  };
+}
+
+// Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -57,11 +122,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: zodToJsonSchema(CreateRelationshipSchema)
     },
     {
-      name: "find_paths",
-      description: "Find paths between two nodes",
-      inputSchema: zodToJsonSchema(FindPathSchema)
-    },
-    {
       name: "get_neighbors",
       description: "Get neighboring nodes of a given node",
       inputSchema: zodToJsonSchema(GetNeighborsSchema)
@@ -69,8 +129,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ]
 }));
 
-// Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const session = driver.session({ database });
   try {
     const { name, arguments: args } = request.params;
     if (!args) throw new Error("Arguments are required");
@@ -78,47 +138,93 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "execute_cypher": {
         const params = ExecuteCypherSchema.parse(args);
-        const result = await client.executeCypher(params.query, params.params);
-        return { toolResult: result };
+        const result = await session.run(params.query, params.params);
+        
+        return {
+          toolResult: result.records.map(record => {
+            const obj: Record<string, any> = {};
+            record.keys.forEach(key => {
+              const value = record.get(key);
+              if (neo4j.isNode(value)) {
+                obj[key] = convertNode(value);
+              } else if (neo4j.isRelationship(value)) {
+                obj[key] = convertRelationship(value);
+              } else if (neo4j.isPath(value)) {
+                obj[key] = {
+                  nodes: value.segments.map(s => convertNode(s.start))
+                    .concat([convertNode(value.end)]),
+                  relationships: value.segments.map(s => convertRelationship(s.relationship))
+                };
+              } else {
+                obj[key] = value;
+              }
+            });
+            return obj;
+          })
+        };
       }
 
       case "create_node": {
-        const params = CreateNodeSchema.parse(args);
-        const result = await client.createNode(params.labels, params.properties);
-        return { toolResult: result };
+        const { labels, properties } = CreateNodeSchema.parse(args);
+        const labelStr = labels.map(l => `:${l}`).join('');
+        const propsStr = Object.entries(properties)
+          .map(([k, v]) => `${k}: $${k}`)
+          .join(', ');
+
+        const query = `CREATE (n${labelStr} {${propsStr}}) RETURN n`;
+        const result = await session.run(query, properties);
+        
+        return { toolResult: convertNode(result.records[0].get('n')) };
       }
 
       case "create_relationship": {
-        const params = CreateRelationshipSchema.parse(args);
-        const result = await client.createRelationship(
-          params.fromNode,
-          params.toNode,
-          params.type,
-          params.properties
-        );
-        return { toolResult: result };
-      }
+        const { fromNode, toNode, type, properties = {} } = CreateRelationshipSchema.parse(args);
+        const propsStr = Object.entries(properties)
+          .map(([k, v]) => `${k}: $${k}`)
+          .join(', ');
 
-      case "find_paths": {
-        const params = FindPathSchema.parse(args);
-        const result = await client.findPaths(
-          params.fromNode,
-          params.toNode,
-          params.maxDepth,
-          params.relationshipTypes
-        );
-        return { toolResult: result };
+        const query = `
+          MATCH (from), (to)
+          WHERE elementId(from) = $fromId AND elementId(to) = $toId
+          CREATE (from)-[r:${type} {${propsStr}}]->(to)
+          RETURN r
+        `;
+
+        const result = await session.run(query, {
+          fromId: fromNode,
+          toId: toNode,
+          ...properties
+        });
+
+        return { toolResult: convertRelationship(result.records[0].get('r')) };
       }
 
       case "get_neighbors": {
-        const params = GetNeighborsSchema.parse(args);
-        const result = await client.getNeighbors(
-          params.nodeId,
-          params.direction,
-          params.relationshipTypes,
-          params.limit
-        );
-        return { toolResult: result };
+        const { nodeId, direction, relationshipTypes = [], limit } = GetNeighborsSchema.parse(args);
+        const relTypeStr = relationshipTypes.length
+          ? `:${relationshipTypes.join('|')}`
+          : '';
+
+        let pattern: string;
+        if (direction === 'incoming') {
+          pattern = `(neighbor)-[${relTypeStr}]->(n)`;
+        } else if (direction === 'outgoing') {
+          pattern = `(n)-[${relTypeStr}]->(neighbor)`;
+        } else {
+          pattern = `(n)-[${relTypeStr}]-(neighbor)`;
+        }
+
+        const query = `
+          MATCH ${pattern}
+          WHERE elementId(n) = $nodeId
+          RETURN DISTINCT neighbor
+          ${limit ? `LIMIT ${limit}` : ''}
+        `;
+
+        const result = await session.run(query, { nodeId });
+        return { 
+          toolResult: result.records.map(record => convertNode(record.get('neighbor'))) 
+        };
       }
 
       default:
@@ -130,14 +236,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       throw new Error(`Tool execution failed: ${error.message}`);
     }
     throw error;
+  } finally {
+    await session.close();
   }
 });
 
-// Start the server
+// Start server
 async function main() {
   try {
     // Verify Neo4j connection
-    await client.verifyConnectivity();
+    await driver.verifyConnectivity();
     console.error('Successfully connected to Neo4j');
 
     // Start server
@@ -153,13 +261,13 @@ async function main() {
 // Handle cleanup
 process.on('SIGINT', async () => {
   console.error('Shutting down...');
-  await client.close();
+  await driver.close();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.error('Shutting down...');
-  await client.close();
+  await driver.close();
   process.exit(0);
 });
 
