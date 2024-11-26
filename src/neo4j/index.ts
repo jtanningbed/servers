@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Driver, auth } from 'neo4j-driver';
+import { driver as createDriver, auth } from 'neo4j-driver';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   ExecuteCypherSchema,
@@ -42,7 +42,7 @@ if (!password) {
   process.exit(1);
 }
 
-const driver = new Driver(uri, auth.basic(username, password));
+const driver = createDriver(uri, auth.basic(username, password));
 
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -83,12 +83,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         return {
           toolResult: result.records.map(record => {
-            const obj: { [key: string]: any } = {};
-            record.keys.forEach(key => {
-              const value = record.get(key);
-              obj[key] = value;
-            });
-            return obj;
+            const resultObj: { [key: string]: any } = {};
+            for (const key of record.keys) {
+              resultObj[key] = record.get(key);
+            }
+            return resultObj;
           })
         };
       }
