@@ -7,52 +7,16 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import neo4j from 'neo4j-driver';
-import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-
-// Schema definitions
-const NodeSchema = z.object({
-  id: z.string(),
-  labels: z.array(z.string()),
-  properties: z.record(z.unknown())
-});
-
-const RelationshipSchema = z.object({
-  id: z.string(),
-  type: z.string(),
-  fromNode: z.string(),
-  toNode: z.string(),
-  properties: z.record(z.unknown())
-});
-
-const PathSchema = z.object({
-  nodes: z.array(NodeSchema),
-  relationships: z.array(RelationshipSchema)
-});
-
-const ExecuteCypherSchema = z.object({
-  query: z.string().min(1).describe("Cypher query to execute"),
-  params: z.record(z.unknown()).optional().describe("Optional query parameters")
-});
-
-const CreateNodeSchema = z.object({
-  labels: z.array(z.string()).min(1).describe("Node labels"),
-  properties: z.record(z.unknown()).describe("Node properties")
-});
-
-const CreateRelationshipSchema = z.object({
-  fromNode: z.string().describe("ID or reference of the source node"),
-  toNode: z.string().describe("ID or reference of the target node"),
-  type: z.string().describe("Relationship type"),
-  properties: z.record(z.unknown()).optional().describe("Optional relationship properties")
-});
-
-const GetNeighborsSchema = z.object({
-  nodeId: z.string().describe("Node ID or reference"),
-  direction: z.enum(['incoming', 'outgoing', 'both']).default('both').describe("Direction of relationships"),
-  relationshipTypes: z.array(z.string()).optional().describe("Filter by relationship types"),
-  limit: z.number().optional().describe("Maximum number of neighbors to return")
-});
+import {
+  ExecuteCypherSchema,
+  CreateNodeSchema,
+  CreateRelationshipSchema,
+  GetNeighborsSchema,
+  NodeSchema,
+  RelationshipSchema,
+  PathSchema
+} from './schemas.js';
 
 // Initialize server
 const server = new Server(
@@ -82,17 +46,17 @@ const driver = neo4j.driver(uri, neo4j.auth.basic(username, password));
 
 // Helper functions for type conversion
 function convertNode(node: neo4j.Node) {
-  return {
+  return NodeSchema.parse({
     id: node.elementId,
     labels: Array.from(node.labels),
     properties: Object.fromEntries(
       Object.entries(node.properties).map(([k, v]) => [k, v])
     )
-  };
+  });
 }
 
 function convertRelationship(rel: neo4j.Relationship) {
-  return {
+  return RelationshipSchema.parse({
     id: rel.elementId,
     type: rel.type,
     fromNode: rel.startNodeElementId,
@@ -100,7 +64,7 @@ function convertRelationship(rel: neo4j.Relationship) {
     properties: Object.fromEntries(
       Object.entries(rel.properties).map(([k, v]) => [k, v])
     )
-  };
+  });
 }
 
 // Tool handlers
@@ -150,11 +114,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               } else if (neo4j.isRelationship(value)) {
                 obj[key] = convertRelationship(value);
               } else if (neo4j.isPath(value)) {
-                obj[key] = {
+                obj[key] = PathSchema.parse({
                   nodes: value.segments.map(s => convertNode(s.start))
                     .concat([convertNode(value.end)]),
                   relationships: value.segments.map(s => convertRelationship(s.relationship))
-                };
+                });
               } else {
                 obj[key] = value;
               }
