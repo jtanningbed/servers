@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Driver, Node, Relationship, Path, driver as createDriver, auth } from 'neo4j-driver';
+import { Driver, Node, Relationship, Path, driver as createDriver, auth, isInt } from 'neo4j-driver';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   ExecuteCypherSchema,
@@ -50,7 +50,7 @@ function convertNode(node: Node) {
     id: node.elementId,
     labels: Array.from(node.labels),
     properties: Object.fromEntries(
-      Object.entries(node.properties).map(([k, v]) => [k, v])
+      Object.entries(node.properties).map(([k, v]) => [k, isInt(v) ? v.toNumber() : v])
     )
   });
 }
@@ -62,7 +62,7 @@ function convertRelationship(rel: Relationship) {
     fromNode: rel.startNodeElementId,
     toNode: rel.endNodeElementId,
     properties: Object.fromEntries(
-      Object.entries(rel.properties).map(([k, v]) => [k, v])
+      Object.entries(rel.properties).map(([k, v]) => [k, isInt(v) ? v.toNumber() : v])
     )
   });
 }
@@ -107,22 +107,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           toolResult: result.records.map(record => {
             const obj: Record<string, any> = {};
-            record.keys.forEach(key => {
+            for (const key of record.keys) {
               const value = record.get(key);
-              if (isNode(value)) {
+              if (value instanceof Node) {
                 obj[key] = convertNode(value);
-              } else if (isRelationship(value)) {
+              } else if (value instanceof Relationship) {
                 obj[key] = convertRelationship(value);
-              } else if (isPath(value)) {
+              } else if (value instanceof Path) {
                 obj[key] = PathSchema.parse({
                   nodes: value.segments.map(s => convertNode(s.start))
                     .concat([convertNode(value.end)]),
                   relationships: value.segments.map(s => convertRelationship(s.relationship))
                 });
               } else {
-                obj[key] = value;
+                obj[key] = isInt(value) ? value.toNumber() : value;
               }
-            });
+            }
             return obj;
           })
         };
@@ -204,19 +204,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     await session.close();
   }
 });
-
-// Helper functions to check types
-function isNode(obj: any): obj is Node {
-  return obj && typeof obj === 'object' && 'labels' in obj && 'properties' in obj && 'elementId' in obj;
-}
-
-function isRelationship(obj: any): obj is Relationship {
-  return obj && typeof obj === 'object' && 'type' in obj && 'properties' in obj && 'elementId' in obj;
-}
-
-function isPath(obj: any): obj is Path {
-  return obj && typeof obj === 'object' && 'segments' in obj && 'start' in obj && 'end' in obj;
-}
 
 // Start server
 async function main() {
