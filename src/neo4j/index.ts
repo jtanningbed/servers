@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import neo4j from 'neo4j-driver';
+import { Driver, Node, Relationship, Path, driver as createDriver, auth } from 'neo4j-driver';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   ExecuteCypherSchema,
@@ -42,10 +42,10 @@ if (!password) {
   process.exit(1);
 }
 
-const driver = neo4j.driver(uri, neo4j.auth.basic(username, password));
+const driver: Driver = createDriver(uri, auth.basic(username, password));
 
 // Helper functions for type conversion
-function convertNode(node: neo4j.Node) {
+function convertNode(node: Node) {
   return NodeSchema.parse({
     id: node.elementId,
     labels: Array.from(node.labels),
@@ -55,7 +55,7 @@ function convertNode(node: neo4j.Node) {
   });
 }
 
-function convertRelationship(rel: neo4j.Relationship) {
+function convertRelationship(rel: Relationship) {
   return RelationshipSchema.parse({
     id: rel.elementId,
     type: rel.type,
@@ -109,11 +109,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const obj: Record<string, any> = {};
             record.keys.forEach(key => {
               const value = record.get(key);
-              if (neo4j.isNode(value)) {
+              if (isNode(value)) {
                 obj[key] = convertNode(value);
-              } else if (neo4j.isRelationship(value)) {
+              } else if (isRelationship(value)) {
                 obj[key] = convertRelationship(value);
-              } else if (neo4j.isPath(value)) {
+              } else if (isPath(value)) {
                 obj[key] = PathSchema.parse({
                   nodes: value.segments.map(s => convertNode(s.start))
                     .concat([convertNode(value.end)]),
@@ -204,6 +204,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     await session.close();
   }
 });
+
+// Helper functions to check types
+function isNode(obj: any): obj is Node {
+  return obj && typeof obj === 'object' && 'labels' in obj && 'properties' in obj && 'elementId' in obj;
+}
+
+function isRelationship(obj: any): obj is Relationship {
+  return obj && typeof obj === 'object' && 'type' in obj && 'properties' in obj && 'elementId' in obj;
+}
+
+function isPath(obj: any): obj is Path {
+  return obj && typeof obj === 'object' && 'segments' in obj && 'start' in obj && 'end' in obj;
+}
 
 // Start server
 async function main() {
