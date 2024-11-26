@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Driver, Node, Relationship, Path, driver as createDriver, auth, isInt } from 'neo4j-driver';
+import { Driver, auth } from 'neo4j-driver';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   ExecuteCypherSchema,
@@ -42,30 +42,7 @@ if (!password) {
   process.exit(1);
 }
 
-const driver: Driver = createDriver(uri, auth.basic(username, password));
-
-// Helper functions for type conversion
-function convertNode(node: Node) {
-  return NodeSchema.parse({
-    id: node.elementId,
-    labels: Array.from(node.labels),
-    properties: Object.fromEntries(
-      Object.entries(node.properties).map(([k, v]) => [k, isInt(v) ? v.toNumber() : v])
-    )
-  });
-}
-
-function convertRelationship(rel: Relationship) {
-  return RelationshipSchema.parse({
-    id: rel.elementId,
-    type: rel.type,
-    fromNode: rel.startNodeElementId,
-    toNode: rel.endNodeElementId,
-    properties: Object.fromEntries(
-      Object.entries(rel.properties).map(([k, v]) => [k, isInt(v) ? v.toNumber() : v])
-    )
-  });
-}
+const driver = new Driver(uri, auth.basic(username, password));
 
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -106,23 +83,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         return {
           toolResult: result.records.map(record => {
-            const obj: Record<string, any> = {};
-            for (const key of record.keys) {
+            const obj: { [key: string]: any } = {};
+            record.keys.forEach(key => {
               const value = record.get(key);
-              if (value instanceof Node) {
-                obj[key] = convertNode(value);
-              } else if (value instanceof Relationship) {
-                obj[key] = convertRelationship(value);
-              } else if (value instanceof Path) {
-                obj[key] = PathSchema.parse({
-                  nodes: value.segments.map(s => convertNode(s.start))
-                    .concat([convertNode(value.end)]),
-                  relationships: value.segments.map(s => convertRelationship(s.relationship))
-                });
-              } else {
-                obj[key] = isInt(value) ? value.toNumber() : value;
-              }
-            }
+              obj[key] = value;
+            });
             return obj;
           })
         };
@@ -137,8 +102,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const query = `CREATE (n${labelStr} {${propsStr}}) RETURN n`;
         const result = await session.run(query, properties);
+        const node = result.records[0].get('n');
         
-        return { toolResult: convertNode(result.records[0].get('n')) };
+        return { toolResult: NodeSchema.parse({
+          id: node.elementId,
+          labels: Array.from(node.labels),
+          properties: node.properties
+        })};
       }
 
       case "create_relationship": {
@@ -160,7 +130,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...properties
         });
 
-        return { toolResult: convertRelationship(result.records[0].get('r')) };
+        const rel = result.records[0].get('r');
+        return { toolResult: RelationshipSchema.parse({
+          id: rel.elementId,
+          type: rel.type,
+          fromNode: rel.startNodeElementId,
+          toNode: rel.endNodeElementId,
+          properties: rel.properties
+        })};
       }
 
       case "get_neighbors": {
@@ -187,7 +164,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const result = await session.run(query, { nodeId });
         return { 
-          toolResult: result.records.map(record => convertNode(record.get('neighbor'))) 
+          toolResult: result.records.map(record => {
+            const node = record.get('neighbor');
+            return NodeSchema.parse({
+              id: node.elementId,
+              labels: Array.from(node.labels),
+              properties: node.properties
+            });
+          })
         };
       }
 
