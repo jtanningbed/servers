@@ -84,9 +84,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           toolResult: result.records.map(record => {
             const resultObj: { [key: string]: any } = {};
-            record.keys.forEach((key: string) => {
-              resultObj[key] = record.get(key);
-            });
+            const keys = Array.from(record.keys);
+            for (const key of keys) {
+              resultObj[String(key)] = record.get(key);
+            }
             return resultObj;
           })
         };
