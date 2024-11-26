@@ -1,26 +1,29 @@
 {
-  "name": "neo4j",
+  "name": "@modelcontextprotocol/server-neo4j",
   "version": "0.1.0",
   "description": "A Model Context Protocol server for Neo4j graph database integration, enabling LLMs to execute graph queries, manage graph data, and traverse relationships.",
   "private": true,
   "type": "module",
   "bin": {
-    "neo4j": "./build/index.js"
+    "mcp-server-neo4j": "./build/index.js"
   },
   "files": [
     "build"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build": "tsc && chmod +x build/index.js",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0"
+    "@modelcontextprotocol/sdk": "0.6.0",
+    "neo4j-driver": "^5.17.0",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "@types/neo4j-driver": "^4.21.0"
   }
 }
