@@ -14,13 +14,15 @@ export class TestTransport {
       throw new Error('Server not set');
     }
 
-    const request = {
+    // Construct a message that follows the MCP protocol
+    const message = {
+      _type: 'request',
       method,
       params
     } as Request;
 
-    // Handle request through server's dispatch method
-    const response = await this.server.dispatch(request);
+    // Use the server's handleMessage method
+    const response = await this.server.handleMessage(message);
 
     if ('error' in response) {
       throw new Error(response.error.message);
