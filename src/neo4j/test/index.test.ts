@@ -1,5 +1,12 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { driver, auth } from 'neo4j-driver';
+import { driver as createDriver, auth } from 'neo4j-driver';
+import { initializeServer, MCPTestHarness } from './mcp-test-utils';
+
+// Import the server creation function (we'll need to export this from index.ts)
+const createServer = () => new Server(
+  { name: "neo4j-mcp-server", version: "0.1.0" },
+  { capabilities: { tools: {}, resources: {} } }
+);
 
 describe('Neo4j MCP Server', () => {
   const dbConfig = {
@@ -10,14 +17,21 @@ describe('Neo4j MCP Server', () => {
   };
 
   let testDriver: any;
+  let server: Server;
+  let mcp: MCPTestHarness;
 
   beforeAll(async () => {
-    testDriver = driver(
+    // Set up Neo4j test driver
+    testDriver = createDriver(
       dbConfig.uri,
       auth.basic(dbConfig.username, dbConfig.password)
     );
-    // Verify connection
     await testDriver.verifyConnectivity();
+
+    // Set up MCP server
+    server = await createServer();
+    const transport = await initializeServer(server);
+    mcp = new MCPTestHarness(transport);
   });
 
   afterAll(async () => {
@@ -45,7 +59,7 @@ describe('Neo4j MCP Server', () => {
           );
 
           // Test query
-          const result = await callTool('query_graph', {
+          const result = await mcp.callTool('query_graph', {
             query: 'MATCH (p:Person) RETURN p.name, p.age'
           });
 
@@ -66,7 +80,7 @@ describe('Neo4j MCP Server', () => {
             'CREATE (p:Person {name: "Bob", age: 25}) RETURN p'
           );
 
-          const result = await callTool('query_graph', {
+          const result = await mcp.callTool('query_graph', {
             query: 'MATCH (p:Person) WHERE p.name = $name RETURN p.age',
             params: { name: 'Bob' }
           });
@@ -81,7 +95,7 @@ describe('Neo4j MCP Server', () => {
 
     describe('modify_graph', () => {
       it('should create nodes and relationships', async () => {
-        const result = await callTool('modify_graph', {
+        const result = await mcp.callTool('modify_graph', {
           query: `
             CREATE (a:Person {name: 'Alice', age: 30})
             CREATE (b:Person {name: 'Bob', age: 25})
@@ -100,7 +114,7 @@ describe('Neo4j MCP Server', () => {
 
       it('should validate query starts with CREATE/MERGE/SET', async () => {
         await expect(
-          callTool('modify_graph', {
+          mcp.callTool('modify_graph', {
             query: 'MATCH (n) RETURN n'
           })
         ).rejects.toThrow(/must start with CREATE, MERGE, or SET/i);
@@ -122,7 +136,7 @@ describe('Neo4j MCP Server', () => {
           CREATE (p1)-[r3:KNOWS]->(p2)
         `);
 
-        const result = await callTool('explore_schema', {});
+        const result = await mcp.callTool('explore_schema', {});
 
         expect(result.toolResult.labels).toContainEqual({
           name: 'Person',
@@ -151,14 +165,14 @@ describe('Neo4j MCP Server', () => {
           CREATE (p)-[r:WORKS_AT]->(c)
         `);
 
-        const resources = await listResources();
+        const resources = await mcp.listResources();
         expect(resources).toContainEqual({
           uri: 'neo4j://schema',
           mimeType: 'application/json',
           name: 'Graph Schema'
         });
 
-        const schema = await readResource('neo4j://schema');
+        const schema = await mcp.readResource('neo4j://schema');
         expect(JSON.parse(schema.contents[0].text)).toMatchObject({
           labels: expect.arrayContaining([{
             name: 'Person',
@@ -177,7 +191,7 @@ describe('Neo4j MCP Server', () => {
   describe('Integration Scenarios', () => {
     it('should support creating and querying a knowledge graph', async () => {
       // Create initial data structure
-      await callTool('modify_graph', {
+      await mcp.callTool('modify_graph', {
         query: `
           CREATE (alice:Person {name: 'Alice', age: 30, role: 'Engineer'})
           CREATE (bob:Person {name: 'Bob', age: 25, role: 'Designer'})
@@ -189,7 +203,7 @@ describe('Neo4j MCP Server', () => {
       });
 
       // Add relationships
-      await callTool('modify_graph', {
+      await mcp.callTool('modify_graph', {
         query: `
           MATCH (alice:Person {name: 'Alice'})
           MATCH (bob:Person {name: 'Bob'})
@@ -209,7 +223,7 @@ describe('Neo4j MCP Server', () => {
       });
 
       // Query team structure
-      const teamQuery = await callTool('query_graph', {
+      const teamQuery = await mcp.callTool('query_graph', {
         query: `
           MATCH (p:Person)-[r:WORKS_ON]->(proj:Project)
           RETURN p.name as name, p.role as role, r.role as projectRole
@@ -224,7 +238,7 @@ describe('Neo4j MCP Server', () => {
       ]);
 
       // Find all paths between team members
-      const pathQuery = await callTool('query_graph', {
+      const pathQuery = await mcp.callTool('query_graph', {
         query: `
           MATCH path = (p1:Person)-[:KNOWS*1..2]->(p2:Person)
           WHERE p1.name = 'Alice' AND p2.name = 'Carol'
@@ -241,7 +255,7 @@ describe('Neo4j MCP Server', () => {
       });
 
       // Check schema after creating the graph
-      const schema = await callTool('explore_schema', {});
+      const schema = await mcp.callTool('explore_schema', {});
       expect(schema.toolResult).toMatchObject({
         labels: expect.arrayContaining([
           { name: 'Person', propertyKeys: expect.arrayContaining(['name', 'age', 'role']) },
@@ -261,14 +275,14 @@ describe('Neo4j MCP Server', () => {
   describe('Error Handling', () => {
     it('should handle syntax errors in Cypher queries', async () => {
       await expect(
-        callTool('query_graph', {
+        mcp.callTool('query_graph', {
           query: 'MATCH n RETURN m'
         })
       ).rejects.toThrow();
     });
 
     it('should handle non-existent properties', async () => {
-      const result = await callTool('query_graph', {
+      const result = await mcp.callTool('query_graph', {
         query: 'MATCH (n:Person) RETURN n.nonexistent'
       });
 
@@ -276,28 +290,21 @@ describe('Neo4j MCP Server', () => {
     });
 
     it('should handle null parameters', async () => {
-      const result = await callTool('query_graph', {
+      const result = await mcp.callTool('query_graph', {
         query: 'RETURN $param as value',
         params: { param: null }
       });
 
       expect(result.toolResult).toEqual([{ value: null }]);
     });
+
+    it('should handle invalid parameter types', async () => {
+      await expect(
+        mcp.callTool('query_graph', {
+          query: 'CREATE (n:Node {prop: $value}) RETURN n',
+          params: { value: undefined }
+        })
+      ).rejects.toThrow();
+    });
   });
 });
-
-// Helper functions to simulate MCP tool calls
-async function callTool(name: string, args: any) {
-  // TODO: Implement proper MCP tool call simulation
-  return { toolResult: [] };
-}
-
-async function listResources() {
-  // TODO: Implement proper MCP resource listing
-  return [];
-}
-
-async function readResource(uri: string) {
-  // TODO: Implement proper MCP resource reading
-  return { contents: [{ text: '{}' }] };
-}
