@@ -3,10 +3,11 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { driver as createDriver, auth, Driver } from 'neo4j-driver';
 import { initializeMCP, MCPTestHarness } from './mcp-test-utils';
 import { createServer } from '../index.js';
-import { getTestConfig } from './config';
+import { getTestConfig } from './config.js';  // Make sure extension is .js
 
 describe('Neo4j MCP Server', () => {
   const config = getTestConfig();
+  console.log('Using config:', config); // Add this for debugging
   let mcp: MCPTestHarness;
   let server: Server;
   let driver: Driver;
