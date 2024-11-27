@@ -60,49 +60,48 @@ class Neo4jServer(Server):
             await self.driver.close()
 
     async def _ensure_context_schema(self, context: str, tx):
-       """Ensure schema exists for given context"""
-       await tx.run(f"""
+        """Ensure schema exists for given context"""
+        await tx.run(f"""
        MERGE (c:Context {{name: $context}})
        """, context=context)
 
     async def _store_facts(self, args: Dict) -> Dict[str, Any]:
-       params = Fact(**args)
-       context = params.context or "default"
-       stored_facts = []
+        params = Fact(**args)
+        context = params.context or "default"
+        stored_facts = []
 
-       async with self.driver.session() as session:
-           async with session.begin_transaction() as tx:
-               await self._ensure_context_schema(context, tx)
-               
-               for fact in params.facts:
-                   subject, predicate, object = await self._extract_fact(fact, tx)
-                   
-                   query = """
-                   MERGE (s:Entity {name: $subject})
-                   MERGE (o:Entity {name: $object}) 
-                   CREATE (s)-[r:RELATES {type: $predicate}]->(o)
-                   SET r.context = $context
-                   RETURN {from: s.name, relation: r.type, to: o.name} as fact
-                   """
-                   
-                   result = await tx.run(query, {
+        async with self.driver.session() as session:
+            async with session.begin_transaction() as tx:
+                await self._ensure_context_schema(context, tx)
+
+                for fact in params.facts:
+                    subject, predicate, object = await self._extract_fact(fact, tx)
+
+                    query = """
+                    MERGE (s:Entity {name: $subject})
+                    ON CREATE SET s.entity_type = $entity_type
+                    MERGE (o:Entity {name: $object}) 
+                    ON CREATE SET o.entity_type = $entity_type
+                    """
+
+                    result = await tx.run(query, {
                        "subject": subject,
                        "predicate": predicate,
                        "object": object,
                        "context": context
                    })
-                   stored_facts.extend(await result.data())
-               
-               await tx.commit()
+                    stored_facts.extend(await result.data())
 
-       return {"stored_facts": stored_facts}
+                await tx.commit()
+
+        return {"stored_facts": stored_facts}
 
     async def _query_knowledge(self, args: Dict) -> Dict[str, Any]:
         params = KnowledgeQuery(**args)
         context_filter = "WHERE r.context = $context" if params.context else ""
 
         query = f"""
-        MATCH p=(s:Entity)-[r:RELATION]->(o:Entity)
+        MATCH p=(s:Entity)-[r:RELATES]->(o:Entity)
         {context_filter}
         RETURN {{
             from: {{ name: s.name, type: s.entity_type }},
@@ -164,22 +163,21 @@ class Neo4jServer(Server):
 
             return {"connections": connections}
 
-    async def _extract_fact(self, fact: str) -> tuple[str, str, str]:
+    async def _extract_fact(self, fact: str, tx) -> tuple[str, str, str]:
         """Extract subject, predicate, object from fact using NLP"""
-        async with self.driver.session() as session:
-            result = await session.run(
-                """
-                CALL apoc.nlp.gcp.entities($fact) YIELD value
-                WITH value.entities as entities
-                WHERE size(entities) >= 2
-                WITH entities[0] as subject, entities[-1] as object,
-                     apoc.text.regexGroups($fact, '.*?\\s(\\w+)\\s.*')[0][1] as predicate
-                RETURN subject.text as subject, predicate, object.text as object
-                """,
-                {"fact": fact},
-            )
-            data = await result.single()
-            return data["subject"], data["predicate"], data["object"]
+        result = await tx.run(
+            """
+            CALL apoc.nlp.gcp.entities($fact) YIELD value
+            WITH value.entities as entities
+            WHERE size(entities) >= 2
+            WITH entities[0] as subject, entities[-1] as object,
+                apoc.text.regexGroups($fact, '.*?\\s(\\w+)\\s.*')[0][1] as predicate
+            RETURN subject.text as subject, predicate, object.text as object
+            """,
+            {"fact": fact},
+        )
+        data = await result.single()
+        return data["subject"], data["predicate"], data["object"]
 
 
 async def serve(
