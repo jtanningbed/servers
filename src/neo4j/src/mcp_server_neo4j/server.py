@@ -38,7 +38,7 @@ class KnowledgeQuery(BaseModel):
 
 class Entity(BaseModel):
     name: str
-    entity_type: str
+    type: str
     observations: List[str] = []
 
 
@@ -50,7 +50,7 @@ class Relation(BaseModel):
 
 SCHEMA_SETUP = """
 CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE;
-CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type);
+CREATE INDEX type IF NOT EXISTS FOR (e:Entity) ON (e.type);
 """
 
 class Neo4jServer(Server):
@@ -81,7 +81,7 @@ class Neo4jServer(Server):
         stored_facts = []
 
         async with self.driver.session() as session:
-            async with session.begin_transaction() as tx:
+            async with await session.begin_transaction() as tx:
                 await self._ensure_context_schema(context, tx)
 
                 for fact in params.facts:
@@ -89,9 +89,9 @@ class Neo4jServer(Server):
 
                     query = """
                     MERGE (s:Entity {name: $subject})
-                    ON CREATE SET s.entity_type = $entity_type
+                    ON CREATE SET s.type = $type
                     MERGE (o:Entity {name: $object}) 
-                    ON CREATE SET o.entity_type = $entity_type
+                    ON CREATE SET o.type = $type
                     """
 
                     result = await tx.run(query, {
@@ -114,9 +114,9 @@ class Neo4jServer(Server):
         MATCH p=(s:Entity)-[r:RELATES]->(o:Entity)
         {context_filter}
         RETURN {{
-            from: {{ name: s.name, type: s.entity_type }},
+            from: {{ name: s.name, type: s.type }},
             relation: r.type,
-            to: {{ name: o.name, type: o.entity_type }}
+            to: {{ name: o.name, type: o.type }}
         }} as relation
         """
 
@@ -134,20 +134,20 @@ class Neo4jServer(Server):
                 for r in data
             ]
 
-            return {"relations": [r.dict() for r in relations]}
+            return {"relations": [r.model_dump() for r in relations]}
 
     async def _find_connections(self, args: Dict) -> Dict[str, Any]:
         params = Connection(**args)
 
         # Validate entities exist
         for name in [params.concept_a, params.concept_b]:
-            entity = Entity(name=name, entity_type="concept")
+            entity = Entity(name=name, type="concept")
 
         query = """
         MATCH path = shortestPath(
             (a:Entity {name: $concept_a})-[r:RELATION*1..$max_depth]-(b:Entity {name: $concept_b})
         )
-        RETURN [n in nodes(path) | {name: n.name, type: n.entity_type}] as nodes,
+        RETURN [n in nodes(path) | {name: n.name, type: n.type}] as nodes,
                [r in relationships(path) | r.type] as relations
         """
 
@@ -166,8 +166,8 @@ class Neo4jServer(Server):
                 ]
                 connections.append(
                     {
-                        "entities": [e.dict() for e in path_entities],
-                        "relations": [r.dict() for r in path_relations],
+                        "entities": [e.model_dump() for e in path_entities],
+                        "relations": [r.model_dump() for r in path_relations],
                     }
                 )
 
