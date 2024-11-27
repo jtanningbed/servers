@@ -1,4 +1,3 @@
-/** @type {import('ts-jest').JestConfigWithTsJest} */
 export default {
   preset: 'ts-jest/presets/default-esm',
   testEnvironment: 'node',
@@ -14,4 +13,6 @@ export default {
   testMatch: [
     '**/test/**/*.test.ts',
   ],
+  testTimeout: 10000,
+  setupFilesAfterEnv: ['./test/jest.setup.ts']
 };

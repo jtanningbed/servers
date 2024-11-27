@@ -1,61 +1,75 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { type Request } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 type BaseResponse = z.ZodObject<any, any>;
 
 export class TestTransport {
-    private messageId = 0;
-    private server?: Server;
+  private server?: Server;
+  private transport: StdioServerTransport;
 
-    setServer(server: Server) {
-        console.log('Setting server on TestTransport');
-        this.server = server;
+  constructor() {
+    this.transport = new StdioServerTransport();
+  }
+
+  async connect(server: Server) {
+    console.log('Connecting server to transport...');
+    this.server = server;
+    await this.server.connect(this.transport);
+  }
+
+  async disconnect() {
+    if (this.server) {
+      console.log('Disconnecting transport...');
+      await this.server.disconnect();
+      this.server = undefined;
     }
+  }
 
-    async request<T extends BaseResponse>(method: string, params: any, resultSchema: T): Promise<z.infer<T>> {
-        if (!this.server) {
-            throw new Error('Server not set');
-        }
-        console.log(`Making request: ${method}`, params);
-
-        const result = await this.server.request({
-            method,
-            params
-        }, resultSchema);
-
-        console.log(`Got result for ${method}:`, result);
-        return result;
+  async request<T extends BaseResponse>(method: string, params: any, resultSchema: T): Promise<z.infer<T>> {
+    if (!this.server) {
+      throw new Error('Server not set');
     }
+    console.log(`Making request: ${method}`, params);
+
+    const result = await this.server.request({
+      method,
+      params
+    }, resultSchema);
+    
+    console.log(`Got result for ${method}:`, result);
+    return result;
+  }
 }
 
-export async function initializeServer(server: Server): Promise<TestTransport> {
-    console.log('Initializing server...');
-    const transport = new TestTransport();
-    transport.setServer(server);
+export async function initializeMCP(server: Server): Promise<MCPTestHarness> {
+  console.log('Initializing MCP...');
+  const transport = new TestTransport();
+  await transport.connect(server);
 
-    console.log('Sending initialize request...');
-    await transport.request('initialize', {
-        capabilities: {
-            tools: true,
-            resources: true
-        }
-    }, z.object({
-        protocolVersion: z.string()
-    }));
+  console.log('Sending initialize request...');
+  await transport.request('initialize', {
+    capabilities: {
+      tools: true,
+      resources: true
+    }
+  }, z.object({
+    protocolVersion: z.string()
+  }));
 
-    console.log('Sending initialized notification...');
-    await transport.request('initialized', {}, z.object({}));
+  console.log('Sending initialized notification...');
+  await transport.request('initialized', {}, z.object({}));
 
-    console.log('Server initialization complete');
-    return transport;
+  console.log('MCP initialization complete');
+  return new MCPTestHarness(transport);
 }
 
 export class MCPTestHarness {
-  private transport: TestTransport;
+  constructor(private transport: TestTransport) {}
 
-  constructor(transport: TestTransport) {
-    this.transport = transport;
+  async cleanup() {
+    await this.transport.disconnect();
   }
 
   async callTool(name: string, args: any) {
