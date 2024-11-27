@@ -1,5 +1,5 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { Request, Response } from '@modelcontextprotocol/sdk/types.js';
+import { type Request } from '@modelcontextprotocol/sdk/types.js';
 
 export class TestTransport {
   private messageId = 0;
@@ -14,14 +14,14 @@ export class TestTransport {
       throw new Error('Server not set');
     }
 
-    const request: Request = {
-      jsonrpc: '2.0',
-      id: this.messageId++,
+    const request = {
       method,
       params
-    };
+    } as Request;
 
-    const response = await this.server.handleRequest(request);
+    // Handle request through server's dispatch method
+    const response = await this.server.dispatch(request);
+
     if ('error' in response) {
       throw new Error(response.error.message);
     }
