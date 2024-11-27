@@ -1,5 +1,4 @@
 from typing import List, Dict, Any, Optional
-from mcp.server.stdio import stdio_server
 from mcp.types import (
     Resource,
     Prompt,
@@ -12,7 +11,14 @@ from mcp.types import (
 from mcp.server import Server
 from pydantic import BaseModel, AnyUrl
 from neo4j import AsyncGraphDatabase, AsyncDriver
+from dotenv import load_dotenv
+import logging
+import os
 
+load_dotenv()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mcp-server-neo4j")
 
 class Fact(BaseModel):
     context: Optional[str]
@@ -49,15 +55,19 @@ CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type);
 
 class Neo4jServer(Server):
     def __init__(self):
+        # print(f'Neo4jServer.__init__')
         super().__init__("mcp-server-neo4j")
         self.driver: Optional[AsyncDriver] = None
 
     async def initialize(self, uri: str, auth: tuple):
         self.driver = AsyncGraphDatabase.driver(uri, auth=auth)
+        logger.info("Driver initialized")
 
     async def shutdown(self):
         if self.driver:
+            logger.info("Driver shutting down...")
             await self.driver.close()
+            logger.info("Driver shutdown complete")
 
     async def _ensure_context_schema(self, context: str, tx):
         """Ensure schema exists for given context"""
@@ -180,13 +190,15 @@ class Neo4jServer(Server):
         return data["subject"], data["predicate"], data["object"]
 
 
-async def serve(
-    uri: str = "neo4j://localhost:7687",
-    username: str = "neo4j",
-    password: str = "password",
-) -> None:
+async def serve() -> None:
+
+    uri=os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+    username=os.getenv("NEO4J_USERNAME", "neo4j")
+    password=os.getenv("NEO4J_PASSWORD", "testpassword")
+
     server = Neo4jServer()
     await server.initialize(uri, (username, password))
+    logger.info("Server initialized")
 
     try: 
         @server.list_resources()
@@ -325,8 +337,10 @@ async def serve(
             result = await handler(arguments or {})
             return [TextContent(type="text", text=str(result))]
 
-        options = server.create_initialization_options()
+        from mcp.server.stdio import stdio_server
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, options)
+            await server.run(
+                read_stream, write_stream, server.create_initialization_options()
+            )
     finally:
         await server.shutdown()
