@@ -1,22 +1,18 @@
 import { z } from 'zod';
 
-// Basic property schemas
-export const NodePropertiesSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number(), z.boolean()]))]));
-export const RelationshipPropertiesSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number(), z.boolean()]))]));
-
-// Core type schemas
+// Core data types
 export const NodeSchema = z.object({
   id: z.string(),
   labels: z.array(z.string()),
-  properties: NodePropertiesSchema
+  properties: z.record(z.unknown())
 });
 
 export const RelationshipSchema = z.object({
   id: z.string(),
   type: z.string(),
-  startNodeId: z.string(),
-  endNodeId: z.string(),
-  properties: RelationshipPropertiesSchema
+  fromNode: z.string(),
+  toNode: z.string(),
+  properties: z.record(z.unknown())
 });
 
 export const PathSchema = z.object({
@@ -24,43 +20,58 @@ export const PathSchema = z.object({
   relationships: z.array(RelationshipSchema)
 });
 
-// Input schemas for tool handlers
-export const ExecuteCypherSchema = z.object({
-  query: z.string(),
-  parameters: z.record(z.any()).optional()
+// Tool schemas
+export const QueryGraphSchema = z.object({
+  query: z.string().min(1).describe(
+    'Cypher query to execute. Examples:\n' +
+    '- MATCH (n:Person) RETURN n\n' +
+    '- MATCH p=(a)-[r:KNOWS]->(b) RETURN p\n' +
+    '- MATCH (n) WHERE n.name = $name RETURN n'
+  ),
+  params: z.record(z.unknown()).optional().describe(
+    'Optional query parameters. Example:\n' +
+    '{ "name": "Alice" }'
+  )
 });
 
-export const CreateNodeSchema = z.object({
-  labels: z.array(z.string()),
-  properties: NodePropertiesSchema
+export const ModifyGraphSchema = z.object({
+  query: z.string().min(1)
+    .regex(/^\s*(CREATE|MERGE|SET)/i)
+    .describe(
+      'Cypher query that modifies the graph. Must start with CREATE, MERGE, or SET. Examples:\n' +
+      '- CREATE (n:Person {name: $name}) RETURN n\n' +
+      '- MERGE (a:Person {name: $name1})-[r:KNOWS]->(b:Person {name: $name2})\n' +
+      '- SET n.age = $age'
+    ),
+  params: z.record(z.unknown()).optional().describe('Query parameters')
 });
 
-export const CreateRelationshipSchema = z.object({
-  startNodeId: z.string(),
-  endNodeId: z.string(),
+// Schema exploration types
+export const LabelSchema = z.object({
+  name: z.string(),
+  propertyKeys: z.array(z.string()),
+  count: z.number()
+});
+
+export const RelationshipTypeSchema = z.object({
   type: z.string(),
-  properties: RelationshipPropertiesSchema
+  propertyKeys: z.array(z.string()),
+  count: z.number(),
+  startNodeLabels: z.array(z.string()),
+  endNodeLabels: z.array(z.string())
 });
 
-export const FindPathSchema = z.object({
-  startNodeId: z.string(),
-  endNodeId: z.string(),
-  relationshipTypes: z.array(z.string()).optional(),
-  maxDepth: z.number().optional()
+export const GraphSchemaSchema = z.object({
+  labels: z.array(LabelSchema),
+  relationshipTypes: z.array(RelationshipTypeSchema)
 });
 
-export const GetNeighborsSchema = z.object({
-  nodeId: z.string(),
-  relationshipTypes: z.array(z.string()).optional(),
-  direction: z.enum(['incoming', 'outgoing', 'both']).optional(),
-  labels: z.array(z.string()).optional()
-});
-
-// Core type exports
+// Type exports
 export type Node = z.infer<typeof NodeSchema>;
 export type Relationship = z.infer<typeof RelationshipSchema>;
 export type Path = z.infer<typeof PathSchema>;
-
-// Property type exports
-export type NodeProperties = z.infer<typeof NodePropertiesSchema>;
-export type RelationshipProperties = z.infer<typeof RelationshipPropertiesSchema>;
+export type QueryGraph = z.infer<typeof QueryGraphSchema>;
+export type ModifyGraph = z.infer<typeof ModifyGraphSchema>;
+export type Label = z.infer<typeof LabelSchema>;
+export type RelationshipType = z.infer<typeof RelationshipTypeSchema>;
+export type GraphSchema = z.infer<typeof GraphSchemaSchema>;
