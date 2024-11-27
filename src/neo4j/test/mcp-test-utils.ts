@@ -1,5 +1,8 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { type Request } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+
+type BaseResponse = z.ZodObject<any, any>;
 
 export class TestTransport {
   private messageId = 0;
@@ -9,22 +12,16 @@ export class TestTransport {
     this.server = server;
   }
 
-  async request(method: string, params: any): Promise<any> {
+  async request<T extends BaseResponse>(method: string, params: any, resultSchema: T): Promise<z.infer<T>> {
     if (!this.server) {
       throw new Error('Server not set');
     }
 
-    // Use the Protocol's request method
-    const response = await this.server.request({
+    // Use the Protocol's request method with schema
+    return await this.server.request({
       method,
       params
-    });
-
-    if ('error' in response) {
-      throw new Error(response.error.message);
-    }
-
-    return response.result;
+    }, resultSchema);
   }
 }
 
@@ -38,10 +35,12 @@ export async function initializeServer(server: Server): Promise<TestTransport> {
       tools: true,
       resources: true
     }
-  });
+  }, z.object({
+    protocolVersion: z.string()
+  }));
 
   // Send initialized notification
-  await transport.request('initialized', {});
+  await transport.request('initialized', {}, z.object({}));
 
   return transport;
 }
@@ -57,23 +56,44 @@ export class MCPTestHarness {
     return this.transport.request('tool/call', {
       name,
       arguments: args
-    });
+    }, z.object({
+      toolResult: z.any()
+    }));
   }
 
   async listResources() {
-    const result = await this.transport.request('resources/list', {});
+    const result = await this.transport.request('resources/list', {}, z.object({
+      resources: z.array(z.object({
+        uri: z.string(),
+        mimeType: z.string(),
+        name: z.string().optional(),
+        description: z.string().optional()
+      }))
+    }));
     return result.resources;
   }
 
   async readResource(uri: string) {
-    const result = await this.transport.request('resources/read', { uri });
+    const result = await this.transport.request('resources/read', { uri }, z.object({
+      contents: z.array(z.object({
+        uri: z.string(),
+        mimeType: z.string(),
+        text: z.string()
+      }))
+    }));
     return {
       contents: result.contents
     };
   }
 
   async listTools() {
-    const result = await this.transport.request('tools/list', {});
+    const result = await this.transport.request('tools/list', {}, z.object({
+      tools: z.array(z.object({
+        name: z.string(),
+        description: z.string(),
+        inputSchema: z.any()
+      }))
+    }));
     return result.tools;
   }
 }
