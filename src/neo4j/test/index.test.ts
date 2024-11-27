@@ -1,8 +1,9 @@
+import { jest, describe, beforeAll, afterAll, beforeEach, it, expect } from '@jest/globals';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { driver as createDriver, auth, Driver } from 'neo4j-driver';
 import { initializeMCP, MCPTestHarness } from './mcp-test-utils';
 import { createServer } from '../index.js';
-import { getTestConfig } from './test-config.js';
+import { getTestConfig } from './config';
 
 describe('Neo4j MCP Server', () => {
   const config = getTestConfig();
