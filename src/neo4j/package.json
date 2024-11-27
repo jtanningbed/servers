@@ -14,7 +14,7 @@
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+    "test": "NODE_OPTIONS='--experimental-vm-modules' npx jest"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "0.6.0",
