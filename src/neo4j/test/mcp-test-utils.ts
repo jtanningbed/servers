@@ -5,44 +5,50 @@ import { z } from 'zod';
 type BaseResponse = z.ZodObject<any, any>;
 
 export class TestTransport {
-  private messageId = 0;
-  private server?: Server;
+    private messageId = 0;
+    private server?: Server;
 
-  setServer(server: Server) {
-    this.server = server;
-  }
-
-  async request<T extends BaseResponse>(method: string, params: any, resultSchema: T): Promise<z.infer<T>> {
-    if (!this.server) {
-      throw new Error('Server not set');
+    setServer(server: Server) {
+        console.log('Setting server on TestTransport');
+        this.server = server;
     }
 
-    // Use the Protocol's request method with schema
-    return await this.server.request({
-      method,
-      params
-    }, resultSchema);
-  }
+    async request<T extends BaseResponse>(method: string, params: any, resultSchema: T): Promise<z.infer<T>> {
+        if (!this.server) {
+            throw new Error('Server not set');
+        }
+        console.log(`Making request: ${method}`, params);
+
+        const result = await this.server.request({
+            method,
+            params
+        }, resultSchema);
+
+        console.log(`Got result for ${method}:`, result);
+        return result;
+    }
 }
 
 export async function initializeServer(server: Server): Promise<TestTransport> {
-  const transport = new TestTransport();
-  transport.setServer(server);
+    console.log('Initializing server...');
+    const transport = new TestTransport();
+    transport.setServer(server);
 
-  // Initialize server
-  await transport.request('initialize', {
-    capabilities: {
-      tools: true,
-      resources: true
-    }
-  }, z.object({
-    protocolVersion: z.string()
-  }));
+    console.log('Sending initialize request...');
+    await transport.request('initialize', {
+        capabilities: {
+            tools: true,
+            resources: true
+        }
+    }, z.object({
+        protocolVersion: z.string()
+    }));
 
-  // Send initialized notification
-  await transport.request('initialized', {}, z.object({}));
+    console.log('Sending initialized notification...');
+    await transport.request('initialized', {}, z.object({}));
 
-  return transport;
+    console.log('Server initialization complete');
+    return transport;
 }
 
 export class MCPTestHarness {
