@@ -1,0 +1,17 @@
+[project]
+name = "mcp-server-neo4j"
+version = "0.1.0"
+description = "Neo4j graph database integration for Model Context Protocol, enabling LLMs to query, update and traverse graph data with secure access controls and transactional consistency"
+readme = "README.md"
+requires-python = ">=3.11.10"
+dependencies = [ "mcp>=1.0.0",]
+[[project.authors]]
+name = "jtanningbed"
+email = "jtan92@gmail.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+mcp-server-neo4j = "mcp_server_neo4j:main"
