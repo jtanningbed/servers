@@ -22,7 +22,7 @@ export class TestTransport {
   async disconnect() {
     if (this.server) {
       console.log('Disconnecting transport...');
-      await this.server.disconnect();
+      await this.server.close();
       this.server = undefined;
     }
   }
