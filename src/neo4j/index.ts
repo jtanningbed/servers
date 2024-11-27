@@ -8,7 +8,7 @@ import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { driver as createDriver, auth } from 'neo4j-driver';
+import { driver as createDriver, auth, isInt, Integer } from 'neo4j-driver';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   QueryGraphSchema,
@@ -67,50 +67,52 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     }
 
     // Get all node labels and their properties
-    const labelResult = await session.run(`
-      CALL db.labels() YIELD label
-      CALL {
-        WITH label
-        MATCH (n:\`${label}\`)
-        WITH label, n, properties(n) as props
-        RETURN label, collect(DISTINCT keys(props)) as propertyKeys, count(n) as nodeCount
-        LIMIT 1
-      }
-      RETURN label as name, propertyKeys[0] as propertyKeys, nodeCount as count
-    `);
+    const labelResult = await session.run(
+      'CALL db.labels() YIELD label ' +
+      'CALL { ' +
+      '  WITH label ' +
+      '  MATCH (n) WHERE $label IN labels(n) ' +
+      '  WITH label, n, properties(n) as props ' +
+      '  RETURN label, collect(DISTINCT keys(props)) as propertyKeys, count(n) as nodeCount ' +
+      '  LIMIT 1 ' +
+      '} ' +
+      'RETURN label as name, propertyKeys[0] as propertyKeys, nodeCount as count',
+      { label: label }
+    );
 
     // Get all relationship types and their properties
-    const relResult = await session.run(`
-      CALL db.relationshipTypes() YIELD relationshipType
-      CALL {
-        WITH relationshipType
-        MATCH (start)-[r:\`${relationshipType}\`]->(end)
-        WITH relationshipType, r, properties(r) as props,
-             labels(start) as startLabels, labels(end) as endLabels
-        RETURN relationshipType,
-               collect(DISTINCT keys(props)) as propertyKeys,
-               count(r) as relCount,
-               collect(DISTINCT startLabels) as startNodeLabels,
-               collect(DISTINCT endLabels) as endNodeLabels
-        LIMIT 1
-      }
-      RETURN relationshipType as type,
-             propertyKeys[0] as propertyKeys,
-             relCount as count,
-             startNodeLabels[0] as startNodeLabels,
-             endNodeLabels[0] as endNodeLabels
-    `);
+    const relResult = await session.run(
+      'CALL db.relationshipTypes() YIELD relationshipType ' +
+      'CALL { ' +
+      '  WITH relationshipType ' +
+      '  MATCH (start)-[r]->(end) WHERE type(r) = $relType ' +
+      '  WITH relationshipType, r, properties(r) as props, ' +
+      '       labels(start) as startLabels, labels(end) as endLabels ' +
+      '  RETURN relationshipType, ' +
+      '         collect(DISTINCT keys(props)) as propertyKeys, ' +
+      '         count(r) as relCount, ' +
+      '         collect(DISTINCT startLabels) as startNodeLabels, ' +
+      '         collect(DISTINCT endLabels) as endNodeLabels ' +
+      '  LIMIT 1 ' +
+      '} ' +
+      'RETURN relationshipType as type, ' +
+      '       propertyKeys[0] as propertyKeys, ' +
+      '       relCount as count, ' +
+      '       startNodeLabels[0] as startNodeLabels, ' +
+      '       endNodeLabels[0] as endNodeLabels',
+      { relType: relationshipType }
+    );
 
     const schema = GraphSchemaSchema.parse({
       labels: labelResult.records.map(record => ({
         name: record.get('name'),
         propertyKeys: record.get('propertyKeys') || [],
-        count: record.get('count').toNumber()
+        count: Integer.fromValue(record.get('count')).toNumber()
       })),
       relationshipTypes: relResult.records.map(record => ({
         type: record.get('type'),
         propertyKeys: record.get('propertyKeys') || [],
-        count: record.get('count').toNumber(),
+        count: Integer.fromValue(record.get('count')).toNumber(),
         startNodeLabels: record.get('startNodeLabels') || [],
         endNodeLabels: record.get('endNodeLabels') || []
       }))
@@ -126,7 +128,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   } finally {
     await session.close();
   }
-}));
+});
 
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -170,7 +172,7 @@ function processQueryValue(value: any): any {
       properties: Object.fromEntries(
         Object.entries(value.properties).map(([k, v]) => [
           k,
-          v && typeof v === 'object' && 'toNumber' in v ? v.toNumber() : v
+          v && typeof v === 'object' && isInt(v) ? Integer.fromValue(v).toNumber() : v
         ])
       )
     };
@@ -186,7 +188,7 @@ function processQueryValue(value: any): any {
       properties: Object.fromEntries(
         Object.entries(value.properties).map(([k, v]) => [
           k,
-          v && typeof v === 'object' && 'toNumber' in v ? v.toNumber() : v
+          v && typeof v === 'object' && isInt(v) ? Integer.fromValue(v).toNumber() : v
         ])
       )
     };
@@ -202,8 +204,8 @@ function processQueryValue(value: any): any {
   }
 
   // Handle Neo4j Integer
-  if (value && typeof value === 'object' && 'toNumber' in value) {
-    return value.toNumber();
+  if (value && typeof value === 'object' && isInt(value)) {
+    return Integer.fromValue(value).toNumber();
   }
 
   return value;
@@ -251,49 +253,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "explore_schema": {
-        const labelResult = await session.run(`
-          CALL db.labels() YIELD label
-          CALL {
-            WITH label
-            MATCH (n:\`${label}\`)
-            WITH label, n, properties(n) as props
-            RETURN label, collect(DISTINCT keys(props)) as propertyKeys, count(n) as nodeCount
-            LIMIT 1
-          }
-          RETURN label as name, propertyKeys[0] as propertyKeys, nodeCount as count
-        `);
+        const labelResult = await session.run(
+          'CALL db.labels() YIELD label ' +
+          'CALL { ' +
+          '  WITH label ' +
+          '  MATCH (n) WHERE $label IN labels(n) ' +
+          '  WITH label, n, properties(n) as props ' +
+          '  RETURN label, collect(DISTINCT keys(props)) as propertyKeys, count(n) as nodeCount ' +
+          '  LIMIT 1 ' +
+          '} ' +
+          'RETURN label as name, propertyKeys[0] as propertyKeys, nodeCount as count',
+          { label: label }
+        );
 
-        const relResult = await session.run(`
-          CALL db.relationshipTypes() YIELD relationshipType
-          CALL {
-            WITH relationshipType
-            MATCH (start)-[r:\`${relationshipType}\`]->(end)
-            WITH relationshipType, r, properties(r) as props,
-                 labels(start) as startLabels, labels(end) as endLabels
-            RETURN relationshipType,
-                   collect(DISTINCT keys(props)) as propertyKeys,
-                   count(r) as relCount,
-                   collect(DISTINCT startLabels) as startNodeLabels,
-                   collect(DISTINCT endLabels) as endNodeLabels
-            LIMIT 1
-          }
-          RETURN relationshipType as type,
-                 propertyKeys[0] as propertyKeys,
-                 relCount as count,
-                 startNodeLabels[0] as startNodeLabels,
-                 endNodeLabels[0] as endNodeLabels
-        `);
+        const relResult = await session.run(
+          'CALL db.relationshipTypes() YIELD relationshipType ' +
+          'CALL { ' +
+          '  WITH relationshipType ' +
+          '  MATCH (start)-[r]->(end) WHERE type(r) = $relType ' +
+          '  WITH relationshipType, r, properties(r) as props, ' +
+          '       labels(start) as startLabels, labels(end) as endLabels ' +
+          '  RETURN relationshipType, ' +
+          '         collect(DISTINCT keys(props)) as propertyKeys, ' +
+          '         count(r) as relCount, ' +
+          '         collect(DISTINCT startLabels) as startNodeLabels, ' +
+          '         collect(DISTINCT endLabels) as endNodeLabels ' +
+          '  LIMIT 1 ' +
+          '} ' +
+          'RETURN relationshipType as type, ' +
+          '       propertyKeys[0] as propertyKeys, ' +
+          '       relCount as count, ' +
+          '       startNodeLabels[0] as startNodeLabels, ' +
+          '       endNodeLabels[0] as endNodeLabels',
+          { relType: relationshipType }
+        );
 
         const schema = GraphSchemaSchema.parse({
           labels: labelResult.records.map(record => ({
             name: record.get('name'),
             propertyKeys: record.get('propertyKeys') || [],
-            count: record.get('count').toNumber()
+            count: Integer.fromValue(record.get('count')).toNumber()
           })),
           relationshipTypes: relResult.records.map(record => ({
             type: record.get('type'),
             propertyKeys: record.get('propertyKeys') || [],
-            count: record.get('count').toNumber(),
+            count: Integer.fromValue(record.get('count')).toNumber(),
             startNodeLabels: record.get('startNodeLabels') || [],
             endNodeLabels: record.get('endNodeLabels') || []
           }))
