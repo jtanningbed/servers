@@ -21,9 +21,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server-neo4j")
 
 
+class Triple(BaseModel):
+    """A single fact represented as a subject-predicate-object triple"""
+
+    subject: str
+    predicate: str
+    object: str
+
+    class Config:
+        json_schema_extra = {
+            "example": {"subject": "Alice", "predicate": "KNOWS", "object": "Bob"}
+        }
+
+
 class Fact(BaseModel):
-    context: Optional[str]
-    facts: List[str]
+    """A collection of facts with optional context"""
+
+    context: Optional[str] = None
+    facts: List[Triple]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "context": "work relationships",
+                "facts": [
+                    {"subject": "Alice", "predicate": "WORKS_WITH", "object": "Bob"}
+                ],
+            }
+        }
 
 
 class Connection(BaseModel):
@@ -79,39 +104,71 @@ class Neo4jServer(Server):
             context=context,
         )
 
+
     async def _store_facts(self, args: Dict) -> Dict[str, Any]:
-        """Store facts in the knowledge graph"""
+        """
+        Store facts in the knowledge graph using the Triple model structure.
+
+        Args:
+            args: Dictionary containing:
+                - context (optional): Context to store facts under
+                - facts: List of Triple objects with subject, predicate, object
+
+        Returns:
+            Dictionary containing stored facts and their metadata
+        """
         params = Fact(**args)
         context = params.context or "default"
         stored_facts = []
 
         async with self.driver.session() as session:
             async with await session.begin_transaction() as tx:
+                # Ensure context exists
                 await self._ensure_context_schema(context, tx)
 
-                for fact in params.facts:
-                    # Simple fact storage - just create the relationship
+                # Process each fact triple
+                for triple in params.facts:
+                    # Create the relationship with proper context
                     query = """
                     MERGE (s:Entity {name: $subject})
+                    ON CREATE SET s.created_at = datetime()
                     MERGE (o:Entity {name: $object})
-                    CREATE (s)-[r:RELATES {type: $predicate, context: $context}]->(o)
-                    RETURN s.name as subject, r.type as predicate, o.name as object
+                    ON CREATE SET o.created_at = datetime()
+                    CREATE (s)-[r:RELATES {
+                        type: $predicate,
+                        context: $context,
+                        created_at: datetime()
+                    }]->(o)
+                    RETURN {
+                        subject: s.name,
+                        predicate: r.type,
+                        object: o.name,
+                        context: r.context,
+                        created_at: r.created_at
+                    } as fact
                     """
 
                     result = await tx.run(
                         query,
                         {
-                            "subject": fact["subject"],
-                            "predicate": fact["predicate"],
-                            "object": fact["object"],
+                            "subject": triple.subject,
+                            "predicate": triple.predicate,
+                            "object": triple.object,
                             "context": context,
                         },
                     )
-                    stored_facts.extend(await result.data())
+
+                    fact_data = await result.single()
+                    if fact_data:
+                        stored_facts.append(fact_data["fact"])
 
                 await tx.commit()
 
-        return {"stored_facts": stored_facts}
+        return {
+            "stored_facts": stored_facts,
+            "context": context,
+            "total_stored": len(stored_facts),
+        }
 
     async def _query_knowledge(self, args: Dict) -> Dict[str, Any]:
         """Query knowledge graph based on context"""
@@ -156,7 +213,7 @@ class Neo4jServer(Server):
         """
 
         async with self.driver.session() as session:
-            result = await session.run(query, params.dict())
+            result = await session.run(query, params.model_dump())
             paths = await result.data()
 
             connections = []

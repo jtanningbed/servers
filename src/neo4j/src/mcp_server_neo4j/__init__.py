@@ -1,15 +1,16 @@
-from . import server
-import asyncio
+from .server import serve
 
 
 def main():
-    logging.basicConfig(level=logging_level, stream=sys.stderr)
-    asyncio.run(
-        server.serve(
-        )
-    )
+    import asyncio
+    import os
+
+    uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+    username = os.getenv("NEO4J_USERNAME", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "testpassword")
+
+    asyncio.run(serve())
+
 
 if __name__ == "__main__":
     main()
-
-__all__ = ["main", "server"]
