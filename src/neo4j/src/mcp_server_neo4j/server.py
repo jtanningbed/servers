@@ -14,6 +14,7 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 from dotenv import load_dotenv
 import logging
 import os
+from enum import Enum
 
 load_dotenv()
 # Configure logging
@@ -46,6 +47,14 @@ class Relation(BaseModel):
     from_entity: str
     to_entity: str
     relation_type: str
+
+
+class NLPProvider(Enum):
+    GCP = "gcp"
+    AWS = "aws"
+    AZURE = "azure"
+    OPENAI = "openai"
+    SPACY = "spacy"
 
 
 SCHEMA_SETUP = """
@@ -173,19 +182,34 @@ class Neo4jServer(Server):
 
             return {"connections": connections}
 
-    async def _extract_fact(self, fact: str, tx) -> tuple[str, str, str]:
-        """Extract subject, predicate, object from fact using NLP"""
-        result = await tx.run(
-            """
-            CALL apoc.nlp.gcp.entities($fact) YIELD value
+
+    async def _extract_fact(
+        self, fact: str, tx, provider: Optional[NLPProvider] = None
+    ) -> tuple[str, str, str]:
+        """Extract subject, predicate, object from fact using specified or available NLP provider"""
+
+        if provider and provider != NLPProvider.SPACY:
+            # Use specified provider
+            query = f"""
+            CALL apoc.nlp.{provider.value}.entities($fact) YIELD value
             WITH value.entities as entities
             WHERE size(entities) >= 2
             WITH entities[0] as subject, entities[-1] as object,
                 apoc.text.regexGroups($fact, '.*?\\s(\\w+)\\s.*')[0][1] as predicate
             RETURN subject.text as subject, predicate, object.text as object
-            """,
-            {"fact": fact},
-        )
+            """
+        elif provider == NLPProvider.SPACY or not provider:
+            # Use spaCy or fallback to it if no provider specified
+            query = """
+            CALL custom.nlp.spacy.entities($fact) YIELD value
+            WITH value.entities as entities
+            WHERE size(entities) >= 2
+            WITH entities[0] as subject, entities[-1] as object,
+                apoc.text.regexGroups($fact, '.*?\\s(\\w+)\\s.*')[0][1] as predicate
+            RETURN subject.text as subject, predicate, object.text as object
+            """
+
+        result = await tx.run(query, {"fact": fact})
         data = await result.single()
         return data["subject"], data["predicate"], data["object"]
 
