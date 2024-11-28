@@ -14,12 +14,12 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 from dotenv import load_dotenv
 import logging
 import os
-from enum import Enum
 
 load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server-neo4j")
+
 
 class Fact(BaseModel):
     context: Optional[str]
@@ -49,22 +49,14 @@ class Relation(BaseModel):
     relation_type: str
 
 
-class NLPProvider(Enum):
-    GCP = "gcp"
-    AWS = "aws"
-    AZURE = "azure"
-    OPENAI = "openai"
-    SPACY = "spacy"
-
-
 SCHEMA_SETUP = """
 CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE;
 CREATE INDEX type IF NOT EXISTS FOR (e:Entity) ON (e.type);
 """
 
+
 class Neo4jServer(Server):
     def __init__(self):
-        # print(f'Neo4jServer.__init__')
         super().__init__("mcp-server-neo4j")
         self.driver: Optional[AsyncDriver] = None
 
@@ -80,11 +72,15 @@ class Neo4jServer(Server):
 
     async def _ensure_context_schema(self, context: str, tx):
         """Ensure schema exists for given context"""
-        await tx.run(f"""
-       MERGE (c:Context {{name: $context}})
-       """, context=context)
+        await tx.run(
+            f"""
+        MERGE (c:Context {{name: $context}})
+        """,
+            context=context,
+        )
 
     async def _store_facts(self, args: Dict) -> Dict[str, Any]:
+        """Store facts in the knowledge graph"""
         params = Fact(**args)
         context = params.context or "default"
         stored_facts = []
@@ -94,21 +90,23 @@ class Neo4jServer(Server):
                 await self._ensure_context_schema(context, tx)
 
                 for fact in params.facts:
-                    subject, predicate, object = await self._extract_fact(fact, tx)
-
+                    # Simple fact storage - just create the relationship
                     query = """
                     MERGE (s:Entity {name: $subject})
-                    ON CREATE SET s.type = $type
-                    MERGE (o:Entity {name: $object}) 
-                    ON CREATE SET o.type = $type
+                    MERGE (o:Entity {name: $object})
+                    CREATE (s)-[r:RELATES {type: $predicate, context: $context}]->(o)
+                    RETURN s.name as subject, r.type as predicate, o.name as object
                     """
 
-                    result = await tx.run(query, {
-                       "subject": subject,
-                       "predicate": predicate,
-                       "object": object,
-                       "context": context
-                   })
+                    result = await tx.run(
+                        query,
+                        {
+                            "subject": fact["subject"],
+                            "predicate": fact["predicate"],
+                            "object": fact["object"],
+                            "context": context,
+                        },
+                    )
                     stored_facts.extend(await result.data())
 
                 await tx.commit()
@@ -116,6 +114,7 @@ class Neo4jServer(Server):
         return {"stored_facts": stored_facts}
 
     async def _query_knowledge(self, args: Dict) -> Dict[str, Any]:
+        """Query knowledge graph based on context"""
         params = KnowledgeQuery(**args)
         context_filter = "WHERE r.context = $context" if params.context else ""
 
@@ -133,7 +132,6 @@ class Neo4jServer(Server):
             result = await session.run(query, {"context": params.context})
             data = await result.data()
 
-            # Convert to validated models
             relations = [
                 Relation(
                     from_entity=r["relation"]["from"]["name"],
@@ -146,15 +144,12 @@ class Neo4jServer(Server):
             return {"relations": [r.model_dump() for r in relations]}
 
     async def _find_connections(self, args: Dict) -> Dict[str, Any]:
+        """Find connections between concepts in the knowledge graph"""
         params = Connection(**args)
-
-        # Validate entities exist
-        for name in [params.concept_a, params.concept_b]:
-            entity = Entity(name=name, type="concept")
 
         query = """
         MATCH path = shortestPath(
-            (a:Entity {name: $concept_a})-[r:RELATION*1..$max_depth]-(b:Entity {name: $concept_b})
+            (a:Entity {name: $concept_a})-[r:RELATES*1..$max_depth]-(b:Entity {name: $concept_b})
         )
         RETURN [n in nodes(path) | {name: n.name, type: n.type}] as nodes,
                [r in relationships(path) | r.type] as relations
@@ -183,52 +178,24 @@ class Neo4jServer(Server):
             return {"connections": connections}
 
 
-    async def _extract_fact(
-        self, fact: str, tx, provider: Optional[NLPProvider] = None
-    ) -> tuple[str, str, str]:
-        """Extract subject, predicate, object from fact using specified or available NLP provider"""
-
-        if provider and provider != NLPProvider.SPACY:
-            # Use specified provider
-            query = f"""
-            CALL apoc.nlp.{provider.value}.entities($fact) YIELD value
-            WITH value.entities as entities
-            WHERE size(entities) >= 2
-            WITH entities[0] as subject, entities[-1] as object,
-                apoc.text.regexGroups($fact, '.*?\\s(\\w+)\\s.*')[0][1] as predicate
-            RETURN subject.text as subject, predicate, object.text as object
-            """
-        elif provider == NLPProvider.SPACY or not provider:
-            # Use spaCy or fallback to it if no provider specified
-            query = """
-            CALL custom.nlp.spacy.entities($fact) YIELD value
-            WITH value.entities as entities
-            WHERE size(entities) >= 2
-            WITH entities[0] as subject, entities[-1] as object,
-                apoc.text.regexGroups($fact, '.*?\\s(\\w+)\\s.*')[0][1] as predicate
-            RETURN subject.text as subject, predicate, object.text as object
-            """
-
-        result = await tx.run(query, {"fact": fact})
-        data = await result.single()
-        return data["subject"], data["predicate"], data["object"]
-
-
 async def serve() -> None:
-
-    uri=os.getenv("NEO4J_URI", "neo4j://localhost:7687")
-    username=os.getenv("NEO4J_USERNAME", "neo4j")
-    password=os.getenv("NEO4J_PASSWORD", "testpassword")
+    uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+    username = os.getenv("NEO4J_USERNAME", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "testpassword")
 
     server = Neo4jServer()
     await server.initialize(uri, (username, password))
     logger.info("Server initialized")
 
-    try: 
+    try:
+
         @server.list_resources()
         async def handle_list_resources() -> List[Resource]:
+            """List available node types in the graph"""
             async with server.driver.session() as session:
-                result = await session.run("MATCH (n) RETURN DISTINCT labels(n) as labels")
+                result = await session.run(
+                    "MATCH (n) RETURN DISTINCT labels(n) as labels"
+                )
                 labels = await result.data()
 
             return [
@@ -244,6 +211,7 @@ async def serve() -> None:
 
         @server.read_resource()
         async def handle_read_resource(uri: AnyUrl) -> str:
+            """Read nodes of a specific type"""
             if uri.scheme != "neo4j":
                 raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
 
@@ -255,6 +223,7 @@ async def serve() -> None:
 
         @server.list_prompts()
         async def handle_list_prompts() -> List[Prompt]:
+            """List available analysis prompts"""
             return [
                 Prompt(
                     name="analyze-graph",
@@ -273,6 +242,7 @@ async def serve() -> None:
         async def handle_get_prompt(
             name: str, arguments: Dict[str, str] | None
         ) -> GetPromptResult:
+            """Get prompt details for graph analysis"""
             if name != "analyze-graph":
                 raise ValueError(f"Unknown prompt: {name}")
 
@@ -304,6 +274,7 @@ async def serve() -> None:
 
         @server.list_tools()
         async def handle_list_tools() -> List[Tool]:
+            """List available graph operation tools"""
             return [
                 Tool(
                     name="store-facts",
@@ -312,7 +283,18 @@ async def serve() -> None:
                         "type": "object",
                         "properties": {
                             "context": {"type": "string"},
-                            "facts": {"type": "array", "items": {"type": "string"}},
+                            "facts": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "subject": {"type": "string"},
+                                        "predicate": {"type": "string"},
+                                        "object": {"type": "string"},
+                                    },
+                                    "required": ["subject", "predicate", "object"],
+                                },
+                            },
                         },
                         "required": ["facts"],
                     },
@@ -348,6 +330,7 @@ async def serve() -> None:
         async def handle_call_tool(
             name: str, arguments: Dict | None
         ) -> List[TextContent]:
+            """Handle tool invocation"""
             tool_handlers = {
                 "store-facts": server._store_facts,
                 "query-knowledge": server._query_knowledge,
@@ -362,6 +345,7 @@ async def serve() -> None:
             return [TextContent(type="text", text=str(result))]
 
         from mcp.server.stdio import stdio_server
+
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
                 read_stream, write_stream, server.create_initialization_options()
