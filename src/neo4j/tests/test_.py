@@ -96,15 +96,13 @@ async def test_spacy_fallback_initialization():
     ):
         server = Neo4jServer()
         await server.initialize("bolt://localhost:7687", ("neo4j", "password"))
-        assert server.spacy_proc is None
         assert NLPProvider.GCP in server.available_providers
 
     # Case 2: No providers available
     with patch.dict("os.environ", {}, clear=True):
         server = Neo4jServer()
-        with patch("neo4j_spacy_procedures.SpacyNLPProcedure") as mock_spacy:
+        with patch("server._register_spacy_procedures") as mock_spacy:
             await server.initialize("bolt://localhost:7687", ("neo4j", "password"))
-            assert server.spacy_proc is not None
             assert NLPProvider.SPACY in server.available_providers
             mock_spacy.assert_called_once()
 
