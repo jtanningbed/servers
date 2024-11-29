@@ -218,10 +218,10 @@ class Neo4jServer(Server):
     async def _ensure_context_schema(self, context: str, tx):
         """Ensure schema exists for given context"""
         await tx.run(
-            f"""
+            """
        MERGE (c:Context {name: $context})
        """,
-            context=context,
+            context=context
         )
 
     async def _store_facts(self, args: Facts) -> StoreFactsResponse:
@@ -566,7 +566,7 @@ async def serve(uri: str = "neo4j://localhost:7687",
 
                 input_model = model_map[name]
                 try:
-                    validated_args = input_model(**(arguments or {}))
+                    validated_args = input_model.model_validate(arguments or {})
                 except ValidationError as e:
                     return [await server.format_error(e)]
 
