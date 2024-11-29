@@ -162,6 +162,20 @@ class ConnectionResponse(BaseModel):
     end_entity: str
     total_paths: int
 
+# Errors
+class Neo4jError(BaseModel):
+    """Error response for Neo4j operations"""
+    error: str
+    details: Optional[str] = None
+    context: Optional[dict] = None
+
+
+class ValidationError(BaseModel):
+    """Error response for input validation failures"""
+    error: str
+    field: str
+    details: str
+
 
 SCHEMA_SETUP = """
 CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE;
@@ -183,6 +197,31 @@ class Neo4jServer(Server):
             logger.info("Driver shutting down...")
             await self.driver.close()
             logger.info("Driver shutdown complete")
+
+    async def format_response(self, response: BaseModel) -> TextContent:
+        """Format a Pydantic model response as TextContent"""
+        return TextContent(
+            type="text",
+            text=response.model_dump_json(indent=2)
+        )
+        
+    async def format_error(self, error: Exception) -> TextContent:
+        """Format an error as TextContent"""
+        if isinstance(error, ValidationError):
+            response = ValidationError(
+                error="Validation Error",
+                field=error.field,
+                details=str(error)
+            )
+        else:
+            response = Neo4jError(
+                error=error.__class__.__name__,
+                details=str(error)
+            )
+        return TextContent(
+            type="text",
+            text=response.model_dump_json(indent=2)
+        )
 
     async def _ensure_context_schema(self, context: str, tx):
         """Ensure schema exists for given context"""
@@ -375,16 +414,19 @@ async def serve(uri: str = "neo4j://localhost:7687",
     username: str = "neo4j",
     password: str = "testpassword"
 ) -> None:
-
-    logging.info(f"Attempting to connect with: URI={uri}, USERNAME={username}")
-    # Don't log the actual password
-    logging.info(f"Password provided: {'Yes' if password else 'No'}")
+    """Initialize and serve the Neo4j MCP server"""
+    logger.info("Starting Neo4j MCP Server...")
 
     server = Neo4jServer()
-    await server.initialize(uri, (username, password))
-    logger.info("Server initialized")
-
     try:
+        # Initialize Neo4j driver
+        await server.initialize(uri, (username, password))
+        logger.info("Connected to Neo4j")
+
+        # Initialize schema
+        async with server.driver.session() as session:
+            await session.run(SCHEMA_SETUP)
+            logger.info("Schema initialized")
 
         @server.list_resources()
         async def handle_list_resources() -> list[Resource]:
@@ -487,92 +529,74 @@ async def serve(uri: str = "neo4j://localhost:7687",
 
         @server.list_tools()
         async def handle_list_tools() -> list[Tool]:
-            """list available graph operation tools"""
+            """List available graph operation tools"""
             return [
                 Tool(
                     name="store-facts",
-                    description="Store new facts in the knowledge graph",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "context": {"type": "string"},
-                            "facts": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "subject": {"type": "string"},
-                                        "predicate": {"type": "string"},
-                                        "object": {"type": "string"},
-                                    },
-                                    "required": ["subject", "predicate", "object"],
-                                },
-                            },
-                        },
-                        "required": ["facts"],
-                    },
+                    description="""Store new facts in the knowledge graph. 
+                    Facts are represented as subject-predicate-object triples,
+                    optionally grouped under a context.""",
+                    inputSchema=Facts.model_json_schema(),
                 ),
                 Tool(
                     name="query-knowledge",
-                    description="Query relationships in the knowledge graph",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "context": {
-                                "type": "string",
-                                "description": "Optional context to filter relationships",
-                            }
-                        },
-                    },
+                    description="Query relationships in the knowledge graph by context",
+                    inputSchema=QueryParams.model_json_schema(),
                 ),
                 Tool(
                     name="find-connections",
                     description="Find paths between two entities in the knowledge graph",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "concept_a": {
-                                "type": "string",
-                                "description": "Starting entity name",
-                            },
-                            "concept_b": {
-                                "type": "string",
-                                "description": "Ending entity name",
-                            },
-                            "max_depth": {
-                                "type": "integer",
-                                "description": "Maximum path length to search",
-                                "default": 3,
-                            },
-                        },
-                        "required": ["concept_a", "concept_b"],
-                    },
+                    inputSchema=ConnectionParams.model_json_schema(),
                 ),
             ]
-
+            
         @server.call_tool()
-        async def handle_call_tool(
-            name: str, arguments: dict | None
-        ) -> list[TextContent]:
-            """Handle tool invocation"""
-            tool_handlers = {
-                "store-facts": server._store_facts,
-                "query-knowledge": server._query_knowledge,
-                "find-connections": server._find_connections,
-            }
+        async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
+            """Handle tool invocation with proper response formatting"""
+            try:
+                tool_handlers = {
+                    "store-facts": server._store_facts,
+                    "query-knowledge": server._query_knowledge,
+                    "find-connections": server._find_connections,
+                }
 
-            handler = tool_handlers.get(name)
-            if not handler:
-                raise ValueError(f"Unknown tool: {name}")
+                handler = tool_handlers.get(name)
+                if not handler:
+                    raise ValueError(f"Unknown tool: {name}")
 
-            result = await handler(arguments or {})
-            return [TextContent(type="text", text=str(result))]
+                # Validate input
+                model_map = {
+                    "store-facts": Facts,
+                    "query-knowledge": QueryParams,
+                    "find-connections": ConnectionParams
+                }
+                
+                input_model = model_map[name]
+                try:
+                    validated_args = input_model(**(arguments or {}))
+                except ValidationError as e:
+                    return [await server.format_error(e)]
+
+                # Execute handler
+                try:
+                    result = await handler(validated_args)
+                    return [await server.format_response(result)]
+                except Exception as e:
+                    logger.error(f"Tool execution error: {e}")
+                    return [await server.format_error(e)]
+                    
+            except Exception as e:
+                logger.error(f"Unexpected error in tool handler: {e}")
+                return [await server.format_error(e)]
 
         from mcp.server.stdio import stdio_server
-
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
                 read_stream, write_stream, server.create_initialization_options()
             )
+
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        raise
     finally:
         await server.shutdown()
