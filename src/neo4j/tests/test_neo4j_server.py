@@ -1,11 +1,12 @@
 # test_neo4j_server.py
 
 import pytest
+from datetime import datetime
 import pytest_asyncio
 from neo4j import AsyncDriver, AsyncSession
 from unittest.mock import AsyncMock, MagicMock, patch
 from mcp.types import Resource, Tool, Prompt, TextContent
-from mcp_server_neo4j.server import Neo4jServer
+from mcp_server_neo4j.server import Neo4jServer, StoreFactsResponse, Relation, Entity, Facts, Fact, ConnectionResponse, ConnectionParams, QueryResponse, QueryParams, Path
 
 
 @pytest.fixture
@@ -81,73 +82,102 @@ class TestKnowledgeOperations:
     @pytest.mark.asyncio
     async def test_store_facts(self, server):
         """Test storing facts in the knowledge graph"""
-        facts = {
-            "context": "test",
-            "facts": [{"subject": "Alice", "predicate": "KNOWS", "object": "Bob"}],
-        }
-
-        mock_result = AsyncMock()
-        mock_result.data.return_value = [
-            {"subject": "Alice", "predicate": "KNOWS", "object": "Bob"}
-        ]
-        server.driver.session.return_value.__aenter__.return_value.begin_transaction.return_value.__aenter__.return_value.run.return_value = (
-            mock_result
+        facts = Facts(
+            context="test",
+            facts=[Fact(subject="Alice", predicate="KNOWS", object="Bob")]
         )
 
+        mock_result = AsyncMock()
+        mock_single = AsyncMock()
+        mock_single.return_value = {
+            "fact": {
+                "subject": "Alice",
+                "predicate": "KNOWS",
+                "object": "Bob"
+            }
+        }
+        mock_result.single = mock_single
+
+        server.driver.session.return_value.__aenter__.return_value.begin_transaction.return_value.__aenter__.return_value.run.return_value = mock_result
+
         result = await server._store_facts(facts)
-        assert "stored_facts" in result
-        assert len(result["stored_facts"]) == 1
+        assert isinstance(result, StoreFactsResponse)
+        assert len(result.stored_facts) == 1
+        assert result.stored_facts[0].subject == "Alice"
 
     @pytest.mark.asyncio
     async def test_query_knowledge(self, server):
         """Test querying knowledge from the graph"""
-        query_params = {"query": "test query", "context": "test"}
+        query_params = QueryParams(context="test")
 
         mock_result = AsyncMock()
-        mock_result.data.return_value = [
-            {
-                "relation": {
-                    "from": {"name": "Alice", "type": "Person"},
-                    "relation": "KNOWS",
-                    "to": {"name": "Bob", "type": "Person"},
-                }
+        mock_result.data.return_value = [{
+            "relation": {
+                "from_entity": {"name": "Alice", "type": "Person"},
+                "to_entity": {"name": "Bob", "type": "Person"},
+                "relation_type": "KNOWS",
+                "context": "test",
+                "created_at": datetime.now()
             }
-        ]
-        server.driver.session.return_value.__aenter__.return_value.run.return_value = (
-            mock_result
-        )
+        }]
+
+        server.driver.session.return_value.__aenter__.return_value.run.return_value = mock_result
 
         result = await server._query_knowledge(query_params)
-        assert "relations" in result
-        assert len(result["relations"]) == 1
+        assert isinstance(result, QueryResponse)
+        assert len(result.relations) == 1
+        assert isinstance(result.relations[0], Relation)
+        assert isinstance(result.relations[0].from_entity, Entity)
+        assert isinstance(result.relations[0].to_entity, Entity)
+        assert result.relations[0].from_entity.name == "Alice"
+        assert result.relations[0].to_entity.name == "Bob"
 
     @pytest.mark.asyncio
     async def test_find_connections(self, server):
-        """Test finding connections between concepts"""
-        connection_params = {
-            "concept_a": "Alice",
-            "concept_b": "Charlie",
-            "max_depth": 2,
-        }
+        """Test finding connections between entities"""
+        params = ConnectionParams(concept_a="Alice", concept_b="Charlie", max_depth=2)
 
         mock_result = AsyncMock()
-        mock_result.data.return_value = [
-            {
-                "nodes": [
+        mock_data = AsyncMock()
+        mock_data.return_value = [{
+            "path": {
+                "entities": [
                     {"name": "Alice", "type": "Person"},
                     {"name": "Bob", "type": "Person"},
-                    {"name": "Charlie", "type": "Person"},
+                    {"name": "Charlie", "type": "Person"}
                 ],
-                "relations": ["KNOWS", "KNOWS"],
+                "relations": [
+                    {
+                        "relation_type": "KNOWS",
+                        "context": "test",
+                        "created_at": datetime.now(),
+                        "from_entity": {"name": "Alice", "type": "Person"},
+                        "to_entity": {"name": "Bob", "type": "Person"}
+                    },
+                    {
+                        "relation_type": "KNOWS",
+                        "context": "test",
+                        "created_at": datetime.now(),
+                        "from_entity": {"name": "Bob", "type": "Person"},
+                        "to_entity": {"name": "Charlie", "type": "Person"}
+                    }
+                ]
             }
-        ]
-        server.driver.session.return_value.__aenter__.return_value.run.return_value = (
-            mock_result
-        )
+        }]
+        mock_result.data = mock_data
 
-        result = await server._find_connections(connection_params)
-        assert "connections" in result
-        assert len(result["connections"]) == 1
+        server.driver.session.return_value.__aenter__.return_value.run.return_value = mock_result
+
+        result = await server._find_connections(params)
+        assert isinstance(result, ConnectionResponse)
+        assert len(result.paths) == 1
+        assert isinstance(result.paths[0], Path)
+        assert len(result.paths[0].entities) == 3
+        assert len(result.paths[0].relations) == 2
+        assert result.paths[0].entities[0].name == "Alice"
+        assert result.paths[0].entities[-1].name == "Charlie"
+        assert result.start_entity == "Alice"
+        assert result.end_entity == "Charlie"
 
 
 class TestToolInterface:
@@ -209,17 +239,13 @@ class TestToolInterface:
         # Mock the store_facts handler
         mock_result = {
             "stored_facts": [
-                {"subject": "Alice", "predicate": "KNOWS", "object": "Bob"}
+                Fact(subject="Alice", predicate="KNOWS", object="Bob")
             ]
         }
         with patch.object(server, "_store_facts", return_value=mock_result):
             result = await handle_call_tool(
                 "store-facts",
-                {
-                    "facts": [
-                        {"subject": "Alice", "predicate": "KNOWS", "object": "Bob"}
-                    ]
-                },
+                Facts(context="test", facts=[Fact(subject="Alice", predicate="KNOWS", object="Bob")])
             )
 
         assert len(result) == 1
@@ -250,5 +276,3 @@ class TestPromptInterface:
         prompts = await handle_list_prompts()
         assert len(prompts) == 1
         assert prompts[0].name == "analyze-graph"
-
-

@@ -1,4 +1,5 @@
-from typing import List, Dict, Any, Optional
+from typing import Any, Optional
+from datetime import datetime
 from mcp.types import (
     Resource,
     Prompt,
@@ -9,11 +10,12 @@ from mcp.types import (
     Tool,
 )
 from mcp.server import Server
-from pydantic import BaseModel, AnyUrl
+from pydantic import BaseModel, AnyUrl, field_validator
 from neo4j import AsyncGraphDatabase, AsyncDriver
 from dotenv import load_dotenv
 import logging
 import os
+
 
 load_dotenv()
 # Configure logging
@@ -21,57 +23,144 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server-neo4j")
 
 
-class Triple(BaseModel):
-    """A single fact represented as a subject-predicate-object triple"""
+# Input Models
+class QueryParams(BaseModel):
+    """Parameters for querying the knowledge graph"""
+    context: Optional[str] = None
 
+
+class ConnectionParams(BaseModel):
+    """Parameters for finding connections between entities"""
+    concept_a: str
+    concept_b: str
+    max_depth: int = 3
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "concept_a": "Alice",
+                    "concept_b": "Bob",
+                    "max_depth": 3
+                }
+            ]
+        }
+    }
+
+
+class Fact(BaseModel):
+    """A single fact represented as a subject-predicate-object triple"""
     subject: str
     predicate: str
     object: str
 
-    class Config:
-        json_schema_extra = {
-            "example": {"subject": "Alice", "predicate": "KNOWS", "object": "Bob"}
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "subject": "Alice",
+                    "predicate": "KNOWS",
+                    "object": "Bob"
+                },
+                {
+                    "subject": "Neural Networks",
+                    "predicate": "IS_TYPE_OF",
+                    "object": "Machine Learning"
+                },
+                {
+                    "subject": "Python",
+                    "predicate": "USED_FOR",
+                    "object": "Data Science"
+                }
+            ]
         }
+    }
 
 
-class Fact(BaseModel):
+class Facts(BaseModel):
     """A collection of facts with optional context"""
-
     context: Optional[str] = None
-    facts: List[Triple]
+    facts: list[Fact]
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "context": "work relationships",
-                "facts": [
-                    {"subject": "Alice", "predicate": "WORKS_WITH", "object": "Bob"}
-                ],
-            }
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "context": "tech_skills",
+                    "facts": [
+                        {
+                            "subject": "Alice",
+                            "predicate": "SKILLED_IN",
+                            "object": "Python"
+                        },
+                        {
+                            "subject": "Python",
+                            "predicate": "USED_IN",
+                            "object": "Data Science"
+                        }
+                    ]
+                }
+            ]
         }
+    }
 
-
-class Connection(BaseModel):
-    concept_a: str
-    concept_b: str
-    max_depth: Optional[int] = 3
-
-
-class KnowledgeQuery(BaseModel):
-    query: str
-    context: Optional[str] = None
-
-
+# Output Models
 class Entity(BaseModel):
     name: str
     type: str
-    observations: List[str] = []
+    observations: list[str] = []
 
 
 class Relation(BaseModel):
-    from_entity: str
-    to_entity: str
+    from_entity: Entity
+    to_entity: Entity
     relation_type: str
+    context: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "from_entity": {"name": "Alice", "type": "Person"},
+                    "to_entity": {"name": "Bob", "type": "Person"},
+                    "relation_type": "KNOWS",
+                    "context": "social",
+                    "created_at": "2024-01-01T00:00:00"
+                }
+            ]
+        }
+    }
+
+
+class StoreFactsResponse(BaseModel):
+    """Response from storing facts in the knowledge graph"""
+    stored_facts: list[Fact]
+    context: str
+    total_stored: int
+    created_at: datetime
+
+
+class QueryResponse(BaseModel):
+    """Response from querying the knowledge graph"""
+    relations: list[Relation]
+    context: Optional[str] = None
+    total_found: int = 0
+
+
+class Path(BaseModel):
+    """A path between two entities"""
+    entities: list[Entity]
+    relations: list[Relation]
+    length: int
+
+
+class ConnectionResponse(BaseModel):
+    """Response from finding connections between entities"""
+    paths: list[Path]
+    start_entity: str
+    end_entity: str
+    total_paths: int
 
 
 SCHEMA_SETUP = """
@@ -104,36 +193,32 @@ class Neo4jServer(Server):
             context=context,
         )
 
-
-    async def _store_facts(self, args: Dict) -> Dict[str, Any]:
-        """
-        Store facts in the knowledge graph using the Triple model structure.
-
+    async def _store_facts(self, args: Facts) -> StoreFactsResponse:
+        """Store facts in the knowledge graph.
         Args:
-            args: Dictionary containing:
+            args: Facts model containing:
                 - context (optional): Context to store facts under
-                - facts: List of Triple objects with subject, predicate, object
+                - facts: list[Fact] of facts to store
 
         Returns:
-            Dictionary containing stored facts and their metadata
+            StoreFactsResponse object containing:
+                - stored_facts: list[Fact] of stored fact metadata
+                - context: The context used
+                - total_stored: Number of facts stored
+                - created_at: Datetime of when the facts were stored
         """
-        params = Fact(**args)
-        context = params.context or "default"
-        stored_facts = []
+        context = args.context if args.context is not None else "default"
+        created_at = datetime.now()
+        stored_facts: list[Fact] = []
 
         async with self.driver.session() as session:
             async with await session.begin_transaction() as tx:
-                # Ensure context exists
                 await self._ensure_context_schema(context, tx)
 
-                # Process each fact triple
-                for triple in params.facts:
-                    # Create the relationship with proper context
+                for fact in args.facts:
                     query = """
                     MERGE (s:Entity {name: $subject})
-                    ON CREATE SET s.created_at = datetime()
                     MERGE (o:Entity {name: $object})
-                    ON CREATE SET o.created_at = datetime()
                     CREATE (s)-[r:RELATES {
                         type: $predicate,
                         context: $context,
@@ -142,103 +227,158 @@ class Neo4jServer(Server):
                     RETURN {
                         subject: s.name,
                         predicate: r.type,
-                        object: o.name,
-                        context: r.context,
-                        created_at: r.created_at
+                        object: o.name
                     } as fact
                     """
 
                     result = await tx.run(
                         query,
                         {
-                            "subject": triple.subject,
-                            "predicate": triple.predicate,
-                            "object": triple.object,
+                            "subject": fact.subject,
+                            "predicate": fact.predicate,
+                            "object": fact.object,
                             "context": context,
                         },
                     )
 
                     fact_data = await result.single()
                     if fact_data:
-                        stored_facts.append(fact_data["fact"])
+                        stored_facts.append(
+                            Fact(
+                                subject=fact_data["fact"]["subject"],
+                                predicate=fact_data["fact"]["predicate"],
+                                object=fact_data["fact"]["object"],
+                            )
+                        )
 
                 await tx.commit()
 
-        return {
-            "stored_facts": stored_facts,
-            "context": context,
-            "total_stored": len(stored_facts),
-        }
+        return StoreFactsResponse(
+            stored_facts=stored_facts,
+            context=context,
+            total_stored=len(stored_facts),
+            created_at=created_at,
+        )
 
-    async def _query_knowledge(self, args: Dict) -> Dict[str, Any]:
-        """Query knowledge graph based on context"""
-        params = KnowledgeQuery(**args)
-        context_filter = "WHERE r.context = $context" if params.context else ""
+    async def _query_knowledge(self, args: QueryParams) -> QueryResponse:
+        """Query relationships in the knowledge graph"""
+        context_filter = "WHERE r.context = $context" if args.context else ""
 
         query = f"""
         MATCH p=(s:Entity)-[r:RELATES]->(o:Entity)
         {context_filter}
         RETURN {{
-            from: {{ name: s.name, type: s.type }},
-            relation: r.type,
-            to: {{ name: o.name, type: o.type }}
+            from_entity: {{ 
+                name: s.name, 
+                type: coalesce(s.type, 'Entity') 
+            }},
+            to_entity: {{ 
+                name: o.name, 
+                type: coalesce(o.type, 'Entity') 
+            }},
+            relation_type: r.type,
+            context: r.context,
+            created_at: r.created_at
         }} as relation
         """
 
         async with self.driver.session() as session:
-            result = await session.run(query, {"context": params.context})
+            result = await session.run(query, {"context": args.context})
             data = await result.data()
 
             relations = [
                 Relation(
-                    from_entity=r["relation"]["from"]["name"],
-                    to_entity=r["relation"]["to"]["name"],
-                    relation_type=r["relation"]["relation"],
+                    from_entity=Entity(**r["relation"]["from_entity"]),
+                    to_entity=Entity(**r["relation"]["to_entity"]),
+                    relation_type=r["relation"]["relation_type"],
+                    context=r["relation"]["context"],
+                    created_at=(r["relation"]["created_at"].to_native() 
+                              if hasattr(r["relation"]["created_at"], "to_native") 
+                              else r["relation"]["created_at"]) if r["relation"]["created_at"] else None,
                 )
                 for r in data
             ]
 
-            return {"relations": [r.model_dump() for r in relations]}
+            return QueryResponse(
+                relations=relations, context=args.context, total_found=len(relations)
+            )
 
-    async def _find_connections(self, args: Dict) -> Dict[str, Any]:
-        """Find connections between concepts in the knowledge graph"""
-        params = Connection(**args)
 
-        query = """
+    async def _find_connections(self, args: ConnectionParams) -> ConnectionResponse:
+        """Find paths between two entities in the knowledge graph"""
+        # We need to interpolate max_depth directly since it can't be a parameter in shortestPath
+        query = f"""
         MATCH path = shortestPath(
-            (a:Entity {name: $concept_a})-[r:RELATES*1..$max_depth]-(b:Entity {name: $concept_b})
+            (a:Entity {{name: $concept_a}})-[r:RELATES*1..{args.max_depth}]-(b:Entity {{name: $concept_b}})
         )
-        RETURN [n in nodes(path) | {name: n.name, type: n.type}] as nodes,
-               [r in relationships(path) | r.type] as relations
+        RETURN {{
+            entities: [n in nodes(path) | {{
+                name: n.name,
+                type: coalesce(n.type, 'Entity')
+            }}],
+            relations: [r in relationships(path) | {{
+                relation_type: r.type,
+                context: r.context,
+                created_at: r.created_at,
+                from_entity: {{
+                    name: startNode(r).name,
+                    type: coalesce(startNode(r).type, 'Entity')
+                }},
+                to_entity: {{
+                    name: endNode(r).name,
+                    type: coalesce(endNode(r).type, 'Entity')
+                }}
+            }}]
+        }} as path
         """
 
-        async with self.driver.session() as session:
-            result = await session.run(query, params.model_dump())
-            paths = await result.data()
+        # Remove max_depth from parameters since it's now in the query string
+        params = {
+            "concept_a": args.concept_a,
+            "concept_b": args.concept_b
+        }
 
-            connections = []
-            for path in paths:
-                path_entities = [Entity(**node) for node in path["nodes"]]
-                path_relations = [
-                    Relation(from_entity=e1.name, to_entity=e2.name, relation_type=rel)
-                    for e1, e2, rel in zip(
-                        path_entities[:-1], path_entities[1:], path["relations"]
+        async with self.driver.session() as session:
+            result = await session.run(query, params)
+            paths_data = await result.data()
+
+            paths = []
+            for p in paths_data:
+                path_data = p["path"]
+                entities = [Entity(**e) for e in path_data["entities"]]
+                relations = []
+                for r in path_data["relations"]:
+                    # Convert Neo4j DateTime to Python datetime if needed
+                    if r["created_at"]:
+                        r["created_at"] = (r["created_at"].to_native() 
+                                         if hasattr(r["created_at"], "to_native") 
+                                         else r["created_at"])
+                    relations.append(Relation(**r))
+
+                paths.append(
+                    Path(
+                        entities=entities,
+                        relations=relations,
+                        length=len(relations)
                     )
-                ]
-                connections.append(
-                    {
-                        "entities": [e.model_dump() for e in path_entities],
-                        "relations": [r.model_dump() for r in path_relations],
-                    }
                 )
 
-            return {"connections": connections}
+            return ConnectionResponse(
+                paths=paths,
+                start_entity=args.concept_a,
+                end_entity=args.concept_b,
+                total_paths=len(paths),
+            )
 
 
-async def serve() -> None:
-    uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
-    username = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "testpassword")
+async def serve(uri: str = "neo4j://localhost:7687",
+    username: str = "neo4j",
+    password: str = "testpassword"
+) -> None:
+
+    logging.info(f"Attempting to connect with: URI={uri}, USERNAME={username}")
+    # Don't log the actual password
+    logging.info(f"Password provided: {'Yes' if password else 'No'}")
 
     server = Neo4jServer()
     await server.initialize(uri, (username, password))
@@ -247,24 +387,40 @@ async def serve() -> None:
     try:
 
         @server.list_resources()
-        async def handle_list_resources() -> List[Resource]:
-            """List available node types in the graph"""
-            async with server.driver.session() as session:
-                result = await session.run(
-                    "MATCH (n) RETURN DISTINCT labels(n) as labels"
-                )
-                labels = await result.data()
+        async def handle_list_resources() -> list[Resource]:
+            """list available node types as resources"""
+            logger = logging.getLogger(__name__)
 
-            return [
-                Resource(
-                    uri=AnyUrl(f"neo4j://{label}"),
-                    name=f"Node type: {label}",
-                    description=f"Access nodes of type {label}",
-                    mimeType="application/json",
-                )
-                for label_set in labels
-                for label in label_set["labels"]
-            ]
+            try:
+                async with server.driver.session() as session:
+                    # Query for all node labels
+                    result = await session.run("""
+                        MATCH (n)
+                        WITH labels(n) as labels
+                        UNWIND labels as label
+                        RETURN DISTINCT label
+                        ORDER BY label
+                    """)
+
+                    labels = await result.data()
+                    logger.info(f"Found labels: {labels}")
+
+                    if not labels:
+                        logger.info("No labels found in database")
+                        return []
+
+                    return [
+                        Resource(
+                            uri=AnyUrl(f"neo4j://{label['label']}", scheme="neo4j"),
+                            name=f"Node type: {label['label']}",
+                            description=f"Access nodes of type {label['label']}",
+                            mimeType="application/json",
+                        )
+                        for label in labels
+                    ]
+            except Exception as e:
+                logger.error(f"Error listing resources: {e}")
+                raise
 
         @server.read_resource()
         async def handle_read_resource(uri: AnyUrl) -> str:
@@ -279,8 +435,8 @@ async def serve() -> None:
             return str(nodes)
 
         @server.list_prompts()
-        async def handle_list_prompts() -> List[Prompt]:
-            """List available analysis prompts"""
+        async def handle_list_prompts() -> list[Prompt]:
+            """list available analysis prompts"""
             return [
                 Prompt(
                     name="analyze-graph",
@@ -297,7 +453,7 @@ async def serve() -> None:
 
         @server.get_prompt()
         async def handle_get_prompt(
-            name: str, arguments: Dict[str, str] | None
+            name: str, arguments: dict[str, str] | None
         ) -> GetPromptResult:
             """Get prompt details for graph analysis"""
             if name != "analyze-graph":
@@ -330,8 +486,8 @@ async def serve() -> None:
             )
 
         @server.list_tools()
-        async def handle_list_tools() -> List[Tool]:
-            """List available graph operation tools"""
+        async def handle_list_tools() -> list[Tool]:
+            """list available graph operation tools"""
             return [
                 Tool(
                     name="store-facts",
@@ -358,25 +514,36 @@ async def serve() -> None:
                 ),
                 Tool(
                     name="query-knowledge",
-                    description="Query the knowledge graph",
+                    description="Query relationships in the knowledge graph",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string"},
-                            "context": {"type": "string"},
+                            "context": {
+                                "type": "string",
+                                "description": "Optional context to filter relationships",
+                            }
                         },
-                        "required": ["query"],
                     },
                 ),
                 Tool(
                     name="find-connections",
-                    description="Find connections between concepts",
+                    description="Find paths between two entities in the knowledge graph",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "concept_a": {"type": "string"},
-                            "concept_b": {"type": "string"},
-                            "max_depth": {"type": "integer", "default": 3},
+                            "concept_a": {
+                                "type": "string",
+                                "description": "Starting entity name",
+                            },
+                            "concept_b": {
+                                "type": "string",
+                                "description": "Ending entity name",
+                            },
+                            "max_depth": {
+                                "type": "integer",
+                                "description": "Maximum path length to search",
+                                "default": 3,
+                            },
                         },
                         "required": ["concept_a", "concept_b"],
                     },
@@ -385,8 +552,8 @@ async def serve() -> None:
 
         @server.call_tool()
         async def handle_call_tool(
-            name: str, arguments: Dict | None
-        ) -> List[TextContent]:
+            name: str, arguments: dict | None
+        ) -> list[TextContent]:
             """Handle tool invocation"""
             tool_handlers = {
                 "store-facts": server._store_facts,
