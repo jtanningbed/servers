@@ -190,6 +190,31 @@ class Neo4jServer(Server):
             await self.driver.close()
             logger.info("Driver shutdown complete")
 
+    async def format_response(self, response: BaseModel) -> TextContent:
+        """Format a Pydantic model response as TextContent"""
+        return TextContent(
+            type="text",
+            text=response.model_dump_json(indent=2)
+        )
+        
+    async def format_error(self, error: Exception) -> TextContent:
+        """Format an error as TextContent"""
+        if isinstance(error, ValidationError):
+            response = ValidationError(
+                error="Validation Error",
+                field=error.field,
+                details=str(error)
+            )
+        else:
+            response = Neo4jError(
+                error=error.__class__.__name__,
+                details=str(error)
+            )
+        return TextContent(
+            type="text",
+            text=response.model_dump_json(indent=2)
+        )
+        
     async def _ensure_context_schema(self, context: str, tx):
         """Ensure schema exists for given context"""
         await tx.run(
