@@ -236,8 +236,8 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.0.1.dev0"
+source = { git = "https://github.com/modelcontextprotocol/python-sdk.git#131902f09fa7cf7dc84a81ae7061e3f0f45ab863" }
 dependencies = [
     { name = "anyio" },
     { name = "httpx" },
@@ -245,10 +245,6 @@ dependencies = [
     { name = "pydantic" },
     { name = "sse-starlette" },
     { name = "starlette" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/97/de/a9ec0a1b6439f90ea59f89004bb2e7ec6890dfaeef809751d9e6577dca7e/mcp-1.0.0.tar.gz", hash = "sha256:dba51ce0b5c6a80e25576f606760c49a91ee90210fed805b530ca165d3bbc9b7", size = 82891 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/89/900c0c8445ec001d3725e475fc553b0feb2e8a51be018f3bb7de51e683db/mcp-1.0.0-py3-none-any.whl", hash = "sha256:bbe70ffa3341cd4da78b5eb504958355c68381fb29971471cea1e642a2af5b8a", size = 36361 },
 ]
 
 [[package]]
@@ -277,7 +273,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mcp", git = "https://github.com/modelcontextprotocol/python-sdk.git" },
     { name = "neo4j", specifier = ">=5.26.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.3" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24.0" },

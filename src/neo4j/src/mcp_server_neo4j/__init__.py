@@ -9,7 +9,7 @@ def main():
     username = os.getenv("NEO4J_USERNAME", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "testpassword")
 
-    asyncio.run(serve())
+    asyncio.run(serve(uri, username, password))
 
 
 if __name__ == "__main__":

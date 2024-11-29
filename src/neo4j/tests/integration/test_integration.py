@@ -2,7 +2,7 @@
 
 import pytest
 import pytest_asyncio
-from mcp_server_neo4j.server import Neo4jServer, StoreFactsResponse, QueryResponse, ConnectionResponse, Relation, Entity, Facts, Fact, ConnectionParams, QueryParams, Path
+from mcp_server_neo4j.server import Neo4jServer, StoreFactsResponse, QueryResponse, ConnectionResponse, Relation, Facts, Fact, ConnectionParams, QueryParams, Path
 from mcp.types import Resource
 
 class TestNeo4jServerIntegration:

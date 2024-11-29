@@ -1,175 +1,41 @@
-from typing import Any, Optional
+from typing import Optional
+from pydantic import BaseModel, AnyUrl
 from datetime import datetime
 from mcp.types import (
     Resource,
+    ResourceTemplate,
     Prompt,
-    PromptArgument,
     GetPromptResult,
     PromptMessage,
     TextContent,
     Tool,
-    ReadResourceResult,
 )
 from mcp.server import Server
-from pydantic import BaseModel, AnyUrl, field_validator
 from neo4j import AsyncGraphDatabase, AsyncDriver
 from dotenv import load_dotenv
 import logging
-import os
+import json
 from .prompts import PROMPTS
-from .resources import RESOURCES
+from .resources import RESOURCES, RESOURCE_TEMPLATES
+from .schemas import (
+    Facts,
+    QueryParams,
+    QueryResponse,
+    ConnectionParams,
+    ConnectionResponse,
+    StoreFactsResponse,
+    Relation,
+    Fact,
+    Entity, 
+    Path,
+    Neo4jError,
+    ValidationError
+)
 
 load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server-neo4j")
-
-
-# Input Models
-class QueryParams(BaseModel):
-    """Parameters for querying the knowledge graph"""
-    context: Optional[str] = None
-    
-    model_config = {
-        "json_schema_extra": {
-            "examples": [{
-                "context": "technology",
-            }]
-        }
-    }
-
-
-class ConnectionParams(BaseModel):
-    """Parameters for finding connections between entities"""
-    concept_a: str
-    concept_b: str
-    max_depth: int = 3
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [{
-                "concept_a": "Alice",
-                "concept_b": "Bob",
-                "max_depth": 3
-            }]
-        }
-    }
-
-
-class Fact(BaseModel):
-    """A single fact represented as a subject-predicate-object triple"""
-    subject: str
-    predicate: str
-    object: str
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "subject": "Alice",
-                    "predicate": "KNOWS",
-                    "object": "Bob"
-                },
-                {
-                    "subject": "Neural Networks",
-                    "predicate": "IS_TYPE_OF",
-                    "object": "Machine Learning"
-                },
-                {
-                    "subject": "Python",
-                    "predicate": "USED_FOR",
-                    "object": "Data Science"
-                }
-            ]
-        }
-    }
-
-
-class Facts(BaseModel):
-    """A collection of facts with optional context"""
-    context: Optional[str] = None
-    facts: list[Fact]
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "context": "tech_skills",
-                    "facts": [
-                        {
-                            "subject": "Alice",
-                            "predicate": "SKILLED_IN",
-                            "object": "Python"
-                        },
-                        {
-                            "subject": "Python",
-                            "predicate": "USED_IN",
-                            "object": "Data Science"
-                        }
-                    ]
-                }
-            ]
-        }
-    }
-
-
-# Output Models
-class Entity(BaseModel):
-    name: str
-    type: str
-    observations: list[str] = []
-
-
-class Relation(BaseModel):
-    from_entity: Entity
-    to_entity: Entity
-    relation_type: str
-    context: Optional[str] = None
-    created_at: Optional[datetime] = None
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "from_entity": {"name": "Alice", "type": "Person"},
-                    "to_entity": {"name": "Bob", "type": "Person"},
-                    "relation_type": "KNOWS",
-                    "context": "social",
-                    "created_at": "2024-01-01T00:00:00"
-                }
-            ]
-        }
-    }
-
-
-class StoreFactsResponse(BaseModel):
-    """Response from storing facts in the knowledge graph"""
-    stored_facts: list[Fact]
-    context: str
-    total_stored: int
-    created_at: datetime
-
-
-class QueryResponse(BaseModel):
-    """Response from querying the knowledge graph"""
-    relations: list[Relation]
-    context: Optional[str] = None
-    total_found: int = 0
-
-
-class Path(BaseModel):
-    """A path between two entities"""
-    entities: list[Entity]
-    relations: list[Relation]
-    length: int
-
-
-class ConnectionResponse(BaseModel):
-    """Response from finding connections between entities"""
-    paths: list[Path]
-    start_entity: str
-    end_entity: str
-    total_paths: int
 
 
 SCHEMA_SETUP = [
@@ -405,10 +271,7 @@ class Neo4jServer(Server):
             )
 
 
-async def serve(uri: str = "neo4j://localhost:7687",
-    username: str = "neo4j",
-    password: str = "testpassword"
-) -> None:
+async def serve(uri: str, username: str, password: str) -> None:
     """Initialize and serve the Neo4j MCP server"""
     logger.info("Starting Neo4j MCP Server...")
 
@@ -428,36 +291,46 @@ async def serve(uri: str = "neo4j://localhost:7687",
             """list available node types as resources"""
             return RESOURCES["contents"]
 
+        @server.list_resource_templates()
+        async def handle_list_resource_templates() -> list[ResourceTemplate]:
+            """list available resource templates"""
+            return RESOURCE_TEMPLATES["contents"]
+
         @server.read_resource()
         async def read_resource(uri: AnyUrl) -> str | bytes:
             uri_str = str(uri)
             async with server.driver.session() as session:
-                # Schema resources
                 if uri_str == "neo4j://schema/nodes":
-                    result = await session.run("""
-                        CALL db.schema.nodeTypeProperties()
-                        YIELD nodeType, propertyName, propertyTypes
-                        RETURN collect({
-                            label: nodeType,
-                            property: propertyName,
-                            types: propertyTypes
-                        }) as schema
-                    """)
-                    return json.dumps(result)
-
-                elif uri_str == "neo4j://schema/relationships":
-                    result = await server.driver.run(
+                    result = await session.run(
                         """
-                        CALL db.schema.relationshipTypeProperties()
-                        YIELD relationshipType, propertyName, propertyTypes
-                        RETURN collect({
-                            type: relationshipType,
-                            property: propertyName,
-                            types: propertyTypes
-                        }) as schema
+                    CALL apoc.meta.nodeTypeProperties()
+                    YIELD nodeType, nodeLabels, propertyName, propertyTypes, mandatory, propertyObservations, totalObservations
+                    RETURN collect({
+                        nodeType: nodeType,
+                        nodeLabels: nodeLabels,
+                        propertyName: propertyName,
+                        propertyTypes: propertyTypes,
+                        mandatory: mandatory,
+                        propertyObservations: propertyObservations,
+                        totalObservations: totalObservations
+                    }) AS schema
                     """
                     )
-                    return json.dumps(result)
+                    data = await result.single()
+                    return json.dumps(data["schema"]) if data else "[]"
+
+                elif uri_str == "neo4j://schema/relationships":
+                    result = await session.run("""
+                    CALL apoc.meta.relTypeProperties()
+                    YIELD relType, propertyName, propertyTypes
+                    RETURN collect({
+                        type: relType,
+                        property: propertyName,
+                        types: propertyTypes
+                    }) as schema
+                    """)
+                    data = await result.single()
+                    return json.dumps(data["schema"])
 
                 elif uri_str == "neo4j://schema/indexes":
                     result = await session.run("""
@@ -470,156 +343,105 @@ async def serve(uri: str = "neo4j://localhost:7687",
                             type: type
                         }) as indexes
                     """)
-                    return json.dumps(result)
+                    data = await result.single()
+                    return json.dumps(data["indexes"])
 
                 # Query resources
-                elif uri_str == "neo4j://queries/active":
+                elif uri_str == "neo4j://queries/slow":
+                    # Assuming we have a method to fetch slow query logs
+                    logger.info("Not implemented yet.")
+                    return "Not implemented yet."
+
+                # Statistics resources
+                elif uri_str == "neo4j://stats/memory":
+                    # Using system commands instead of dbms
+                    result = await session.run(
+                        """
+                        SHOW SETTINGS YIELD name, value 
+                        WHERE name CONTAINS 'memory' OR name CONTAINS 'heap'
+                        RETURN name, value
+                    """
+                    )
+                    data = await result.single()
+                    return json.dumps(data)
+
+                elif uri_str == "neo4j://stats/transactions":
+                    # Using system transactions info
+                    result = await session.run(
+                        """
+                        CALL apoc.monitor.tx()
+                        YIELD rolledBackTx, peakTx, lastTxId, currentOpenedTx, totalOpenedTx, totalTx
+                        RETURN {
+                            rolledBackTx: rolledBackTx,
+                            peakTx: peakTx,
+                            lastTxId: lastTxId,
+                            currentOpenedTx: currentOpenedTx,
+                            totalOpenedTx: totalOpenedTx,
+                            totalTx: totalTx
+                        } as stats
+                    """
+                    )
+                    data = await result.single()
+                    return json.dumps(data["stats"])
+
+                # Label count
+                elif uri_str.startswith("neo4j://labels") and uri_str.endswith(
+                    "/count"
+                ):
+                    result = await session.run("""
+                        CALL apoc.meta.stats() 
+                        YIELD labelCount 
+                        RETURN labelCount as count
+                    """)
+                    data = await result.single()
+                    return str(data["count"])
+
+                # Template resources handling
+                elif uri_str.startswith("neo4j://queries/active"):
+                    query_id = uri_str.split("/")[-2]
                     result = await session.run(
                         """
                         SHOW TRANSACTIONS
                         YIELD transactionId, currentQueryId, currentQuery, status, elapsedTime
                         WHERE currentQueryId <> $currentQueryId
                         RETURN collect({
-                            id: queryId,
-                            query: query,
-                            params: parameters,
-                            runtime: runtime,
-                            elapsedMs: elapsedTime
+                            transactionId: transactionId,
+                            queryId: currentQueryId,
+                            query: currentQuery,
+                            status: status,
+                            elapsedTime: elapsedTime
                         }) as queries
                     """,
-                        {"currentQueryId": "current-query-id"},
+                        {"currentQueryId": query_id if query_id else "current-query-id"},
                     )
-                    return json.dumps(result)
+                    data = await result.single()
+                    return json.dumps(data["queries"])
 
-                elif uri_str == "neo4j://queries/slow":
-                    # Assuming we have a method to fetch slow query logs
-                    logger.info("Not implemented yet.")
-                    return ""
-
-                # Statistics resources
-                elif uri_str == "neo4j://stats/memory":
-                    result = await session.run("""
-                        CALL dbms.memory.detailed() 
-                        YIELD name, bytes
-                        RETURN collect({
-                            name: name,
-                            bytes: bytes
-                        }) as memory
-                    """)
-                    return json.dumps(result)
-
-                elif uri_str == "neo4j://stats/transactions":
-                    result = await session.run("""
-                        CALL dbms.queryStatistics()
-                        YIELD activeTransactions, peakTransactions, 
-                            totalTransactions, currentReadTransactions,
-                            currentWriteTransactions
-                        RETURN {
-                            active: activeTransactions,
-                            peak: peakTransactions,
-                            total: totalTransactions,
-                            currentRead: currentReadTransactions,
-                            currentWrite: currentWriteTransactions
-                        } as stats
-                    """)
-                    return json.dumps(result)
-
-                # Template resources handling
+                # Node count by label
                 elif uri_str.startswith("neo4j://nodes/") and uri_str.endswith("/count"):
                     label = uri_str.split("/")[-2]
                     result = await session.run(
-                        "MATCH (n:`" + label + "`) RETURN count(n) as count"
+                        "CALL apoc.meta.stats() YIELD labels RETURN labels[$label] as count",
+                        {"label": label}
                     )
-                    return str(result["count"])
+                    data = await result.single()
+                    return str(data["count"])
 
+                # Relationship count by type
                 elif uri_str.startswith("neo4j://relationships/") and uri_str.endswith("/count"):
                     rel_type = uri_str.split("/")[-2]
                     result = await session.run(
-                        "MATCH ()-[r:`" + rel_type + "`]->() RETURN count(r) as count"
+                        "CALL apoc.meta.stats() YIELD relTypesCount RETURN relTypesCount[$rel_type] as count",
+                        {"rel_type": rel_type}
                     )
-                    return str(result["count"])
+                    data = await result.single()
+                    return str(data["count"])
 
             raise ValueError(f"Resource not found: {uri_str}")
 
-        async def _fetch_resource_content(uri: AnyUrl):
-            """Fetch the content for a specific resource"""
-            if uri == "neo4j://schema/nodes":
-                # Query for node schema
-                result = await self.graph_db.run("""
-                    CALL db.schema.nodeTypeProperties()
-                    YIELD nodeType, propertyName, propertyTypes
-                    RETURN collect({
-                        label: nodeType,
-                        property: propertyName,
-                        types: propertyTypes
-                    }) as schema
-                """)
-                return result.json()
-
-            elif uri.path == "schema/relationships":
-                # Query for relationship schema
-                result = await session.run("""
-                    CALL db.schema.relationshipTypeProperties()
-                    YIELD relationshipType, propertyName, propertyTypes
-                    RETURN collect({
-                        type: relationshipType,
-                        property: propertyName,
-                        types: propertyTypes
-                    }) as schema
-                """)
-                return ReadResourceResult(contents=[await r.data() for r in result])
-
-            elif uri.path == "schema/indexes":
-                # Query for indexes
-                result = await session.run("""
-                    SHOW INDEXES
-                    YIELD name, labelsOrTypes, properties, type
-                    RETURN collect({
-                        name: name,
-                        labels: labelsOrTypes,
-                        properties: properties,
-                        type: type
-                    }) as indexes
-                """)
-                return ReadResourceResult(contents=[await r.data() for r in result])
-
-            elif uri.path == "queries/active":
-                # Query for active queries
-                result = await session.run("""
-                    CALL dbms.listQueries()
-                    YIELD queryId, query, parameters, runtime, elapsedTimeMillis
-                    WHERE queryId <> $currentQueryId
-                    RETURN collect({
-                        id: queryId,
-                        query: query,
-                        params: parameters,
-                        runtime: runtime,
-                        elapsedMs: elapsedTimeMillis
-                    }) as queries
-                """, {"currentQueryId": "current-query-id"})
-                return ReadResourceResult(contents=[await r.data() for r in result])
-
-            elif str(uri).startswith("neo4j://nodes/"):
-                # Handle node count template
-                label = uri.split("/")[-2]
-                result = await session.run(
-                    "MATCH (n:`" + label + "`) RETURN count(n) as count"
-                )
-                return ReadResourceResult(contents=[str(result["count"])])
-
-            elif str(uri).startswith("neo4j://relationships/"):
-                # Handle relationship count template
-                rel_type = uri.split("/")[-2]
-                result = await session.run(
-                    "MATCH ()-[r:`" + rel_type + "`]->() RETURN count(r) as count"
-                )
-                return ReadResourceResult(contents=[str(result["count"])])
-
-            raise ValueError(f"Resource implementation not found: {uri}")
-
         @server.list_prompts()
         async def handle_list_prompts() -> list[Prompt]:
-            """list available analysis prompts"""
+            """list available prompts"""
             return list(PROMPTS.values())
 
         @server.get_prompt()
@@ -631,17 +453,10 @@ async def serve(uri: str = "neo4j://localhost:7687",
                 raise ValueError(f"Unknown prompt: {name}")
 
             # Generate appropriate messages based on prompt type
-            if prompt_name == "graph-query":
+            if name == "graph-query":
                 question = arguments.get("question") if arguments else ""
                 return GetPromptResult(
                     messages=[
-                        PromptMessage(
-                            role="system",
-                            content=TextContent(
-                                type="text",
-                                text="You are a Neo4j expert that helps translate natural language questions into Cypher queries."
-                            )
-                        ),
                         PromptMessage(
                             role="user",
                             content=TextContent(
@@ -652,17 +467,10 @@ async def serve(uri: str = "neo4j://localhost:7687",
                     ]
                 )
 
-            elif prompt_name == "relationship-analysis":
+            elif name == "relationship-analysis":
                 max_depth = arguments.get("max_depth", 3)
                 return GetPromptResult(
                     messages=[
-                        PromptMessage(
-                            role="system",
-                            content=TextContent(
-                                type="text",
-                                text="You are a graph relationship analyst that helps understand connections between nodes."
-                            )
-                        ),
                         PromptMessage(
                             role="user",
                             content=TextContent(
@@ -675,17 +483,10 @@ async def serve(uri: str = "neo4j://localhost:7687",
                     ]
                 )
 
-            elif prompt_name == "schema-suggestion":
+            elif name == "schema-suggestion":
                 focus_area = arguments.get("focus_area", "full schema")
                 return GetPromptResult(
                     messages=[
-                        PromptMessage(
-                            role="system",
-                            content=TextContent(
-                                type="text",
-                                text="You are a Neo4j schema optimization expert.",
-                            ),
-                        ),
                         PromptMessage(
                             role="user",
                             content=TextContent(
@@ -700,16 +501,9 @@ async def serve(uri: str = "neo4j://localhost:7687",
                     ]
                 )
 
-            elif prompt_name == "query-optimization":
+            elif name == "query-optimization":
                 return GetPromptResult(
                     messages=[
-                        PromptMessage(
-                            role="system",
-                            content=TextContent(
-                                type="text",
-                                text="You are a Neo4j query optimization expert."
-                            )
-                        ),
                         PromptMessage(
                             role="user",
                             content=TextContent(
