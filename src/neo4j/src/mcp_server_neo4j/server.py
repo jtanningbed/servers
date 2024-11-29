@@ -8,6 +8,7 @@ from mcp.types import (
     PromptMessage,
     TextContent,
     Tool,
+    ReadResourceResult,
 )
 from mcp.server import Server
 from pydantic import BaseModel, AnyUrl, field_validator
@@ -15,6 +16,8 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 from dotenv import load_dotenv
 import logging
 import os
+from .prompts import PROMPTS
+from .resources import RESOURCES
 
 load_dotenv()
 # Configure logging
@@ -196,7 +199,7 @@ class Neo4jServer(Server):
             type="text",
             text=response.model_dump_json(indent=2)
         )
-        
+
     async def format_error(self, error: Exception) -> TextContent:
         """Format an error as TextContent"""
         if isinstance(error, ValidationError):
@@ -214,7 +217,7 @@ class Neo4jServer(Server):
             type="text",
             text=response.model_dump_json(indent=2)
         )
-        
+
     async def _ensure_context_schema(self, context: str, tx):
         """Ensure schema exists for given context"""
         await tx.run(
@@ -335,7 +338,6 @@ class Neo4jServer(Server):
                 relations=relations, context=args.context, total_found=len(relations)
             )
 
-
     async def _find_connections(self, args: ConnectionParams) -> ConnectionResponse:
         """Find paths between two entities in the knowledge graph"""
         # We need to interpolate max_depth directly since it can't be a parameter in shortestPath
@@ -424,101 +426,307 @@ async def serve(uri: str = "neo4j://localhost:7687",
         @server.list_resources()
         async def handle_list_resources() -> list[Resource]:
             """list available node types as resources"""
-            logger = logging.getLogger(__name__)
-
-            try:
-                async with server.driver.session() as session:
-                    # Query for all node labels
-                    result = await session.run("""
-                        MATCH (n)
-                        WITH labels(n) as labels
-                        UNWIND labels as label
-                        RETURN DISTINCT label
-                        ORDER BY label
-                    """)
-
-                    labels = await result.data()
-                    logger.info(f"Found labels: {labels}")
-
-                    if not labels:
-                        logger.info("No labels found in database")
-                        return []
-
-                    return [
-                        Resource(
-                            uri=AnyUrl(f"neo4j://{label['label']}", scheme="neo4j"),
-                            name=f"Node type: {label['label']}",
-                            description=f"Access nodes of type {label['label']}",
-                            mimeType="application/json",
-                        )
-                        for label in labels
-                    ]
-            except Exception as e:
-                logger.error(f"Error listing resources: {e}")
-                raise
+            return RESOURCES["contents"]
 
         @server.read_resource()
-        async def handle_read_resource(uri: AnyUrl) -> str:
-            """Read nodes of a specific type"""
-            if uri.scheme != "neo4j":
-                raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
-
-            label = uri.host
+        async def read_resource(uri: AnyUrl) -> str | bytes:
+            uri_str = str(uri)
             async with server.driver.session() as session:
-                result = await session.run(f"MATCH (n:{label}) RETURN n")
-                nodes = await result.data()
-            return str(nodes)
+                # Schema resources
+                if uri_str == "neo4j://schema/nodes":
+                    result = await session.run("""
+                        CALL db.schema.nodeTypeProperties()
+                        YIELD nodeType, propertyName, propertyTypes
+                        RETURN collect({
+                            label: nodeType,
+                            property: propertyName,
+                            types: propertyTypes
+                        }) as schema
+                    """)
+                    return json.dumps(result)
+
+                elif uri_str == "neo4j://schema/relationships":
+                    result = await server.driver.run(
+                        """
+                        CALL db.schema.relationshipTypeProperties()
+                        YIELD relationshipType, propertyName, propertyTypes
+                        RETURN collect({
+                            type: relationshipType,
+                            property: propertyName,
+                            types: propertyTypes
+                        }) as schema
+                    """
+                    )
+                    return json.dumps(result)
+
+                elif uri_str == "neo4j://schema/indexes":
+                    result = await session.run("""
+                        SHOW INDEXES
+                        YIELD name, labelsOrTypes, properties, type
+                        RETURN collect({
+                            name: name,
+                            labels: labelsOrTypes,
+                            properties: properties,
+                            type: type
+                        }) as indexes
+                    """)
+                    return json.dumps(result)
+
+                # Query resources
+                elif uri_str == "neo4j://queries/active":
+                    result = await session.run(
+                        """
+                        SHOW TRANSACTIONS
+                        YIELD transactionId, currentQueryId, currentQuery, status, elapsedTime
+                        WHERE currentQueryId <> $currentQueryId
+                        RETURN collect({
+                            id: queryId,
+                            query: query,
+                            params: parameters,
+                            runtime: runtime,
+                            elapsedMs: elapsedTime
+                        }) as queries
+                    """,
+                        {"currentQueryId": "current-query-id"},
+                    )
+                    return json.dumps(result)
+
+                elif uri_str == "neo4j://queries/slow":
+                    # Assuming we have a method to fetch slow query logs
+                    logger.info("Not implemented yet.")
+                    return ""
+
+                # Statistics resources
+                elif uri_str == "neo4j://stats/memory":
+                    result = await session.run("""
+                        CALL dbms.memory.detailed() 
+                        YIELD name, bytes
+                        RETURN collect({
+                            name: name,
+                            bytes: bytes
+                        }) as memory
+                    """)
+                    return json.dumps(result)
+
+                elif uri_str == "neo4j://stats/transactions":
+                    result = await session.run("""
+                        CALL dbms.queryStatistics()
+                        YIELD activeTransactions, peakTransactions, 
+                            totalTransactions, currentReadTransactions,
+                            currentWriteTransactions
+                        RETURN {
+                            active: activeTransactions,
+                            peak: peakTransactions,
+                            total: totalTransactions,
+                            currentRead: currentReadTransactions,
+                            currentWrite: currentWriteTransactions
+                        } as stats
+                    """)
+                    return json.dumps(result)
+
+                # Template resources handling
+                elif uri_str.startswith("neo4j://nodes/") and uri_str.endswith("/count"):
+                    label = uri_str.split("/")[-2]
+                    result = await session.run(
+                        "MATCH (n:`" + label + "`) RETURN count(n) as count"
+                    )
+                    return str(result["count"])
+
+                elif uri_str.startswith("neo4j://relationships/") and uri_str.endswith("/count"):
+                    rel_type = uri_str.split("/")[-2]
+                    result = await session.run(
+                        "MATCH ()-[r:`" + rel_type + "`]->() RETURN count(r) as count"
+                    )
+                    return str(result["count"])
+
+            raise ValueError(f"Resource not found: {uri_str}")
+
+        async def _fetch_resource_content(uri: AnyUrl):
+            """Fetch the content for a specific resource"""
+            if uri == "neo4j://schema/nodes":
+                # Query for node schema
+                result = await self.graph_db.run("""
+                    CALL db.schema.nodeTypeProperties()
+                    YIELD nodeType, propertyName, propertyTypes
+                    RETURN collect({
+                        label: nodeType,
+                        property: propertyName,
+                        types: propertyTypes
+                    }) as schema
+                """)
+                return result.json()
+
+            elif uri.path == "schema/relationships":
+                # Query for relationship schema
+                result = await session.run("""
+                    CALL db.schema.relationshipTypeProperties()
+                    YIELD relationshipType, propertyName, propertyTypes
+                    RETURN collect({
+                        type: relationshipType,
+                        property: propertyName,
+                        types: propertyTypes
+                    }) as schema
+                """)
+                return ReadResourceResult(contents=[await r.data() for r in result])
+
+            elif uri.path == "schema/indexes":
+                # Query for indexes
+                result = await session.run("""
+                    SHOW INDEXES
+                    YIELD name, labelsOrTypes, properties, type
+                    RETURN collect({
+                        name: name,
+                        labels: labelsOrTypes,
+                        properties: properties,
+                        type: type
+                    }) as indexes
+                """)
+                return ReadResourceResult(contents=[await r.data() for r in result])
+
+            elif uri.path == "queries/active":
+                # Query for active queries
+                result = await session.run("""
+                    CALL dbms.listQueries()
+                    YIELD queryId, query, parameters, runtime, elapsedTimeMillis
+                    WHERE queryId <> $currentQueryId
+                    RETURN collect({
+                        id: queryId,
+                        query: query,
+                        params: parameters,
+                        runtime: runtime,
+                        elapsedMs: elapsedTimeMillis
+                    }) as queries
+                """, {"currentQueryId": "current-query-id"})
+                return ReadResourceResult(contents=[await r.data() for r in result])
+
+            elif str(uri).startswith("neo4j://nodes/"):
+                # Handle node count template
+                label = uri.split("/")[-2]
+                result = await session.run(
+                    "MATCH (n:`" + label + "`) RETURN count(n) as count"
+                )
+                return ReadResourceResult(contents=[str(result["count"])])
+
+            elif str(uri).startswith("neo4j://relationships/"):
+                # Handle relationship count template
+                rel_type = uri.split("/")[-2]
+                result = await session.run(
+                    "MATCH ()-[r:`" + rel_type + "`]->() RETURN count(r) as count"
+                )
+                return ReadResourceResult(contents=[str(result["count"])])
+
+            raise ValueError(f"Resource implementation not found: {uri}")
 
         @server.list_prompts()
         async def handle_list_prompts() -> list[Prompt]:
             """list available analysis prompts"""
-            return [
-                Prompt(
-                    name="analyze-graph",
-                    description="Analyze relationships in the knowledge graph",
-                    arguments=[
-                        PromptArgument(
-                            name="context",
-                            description="Optional context to filter analysis",
-                            required=False,
-                        )
-                    ],
-                )
-            ]
+            return list(PROMPTS.values())
 
         @server.get_prompt()
         async def handle_get_prompt(
             name: str, arguments: dict[str, str] | None
         ) -> GetPromptResult:
             """Get prompt details for graph analysis"""
-            if name != "analyze-graph":
+            if name not in PROMPTS:
                 raise ValueError(f"Unknown prompt: {name}")
 
-            context = (arguments or {}).get("context", "")
-            context_clause = f"WHERE r.context = '{context}'" if context else ""
-
-            async with server.driver.session() as session:
-                result = await session.run(
-                    f"""
-                    MATCH (n)-[r]->(m)
-                    {context_clause}
-                    RETURN n.name as source, type(r) as relationship, m.name as target
-                    """
-                )
-                relationships = await result.data()
-
-            return GetPromptResult(
-                description="Analyze the knowledge graph structure",
-                messages=[
-                    PromptMessage(
-                        role="user",
-                        content=TextContent(
-                            type="text",
-                            text=f"Analyze these relationships:\n{str(relationships)}",
+            # Generate appropriate messages based on prompt type
+            if prompt_name == "graph-query":
+                question = arguments.get("question") if arguments else ""
+                return GetPromptResult(
+                    messages=[
+                        PromptMessage(
+                            role="system",
+                            content=TextContent(
+                                type="text",
+                                text="You are a Neo4j expert that helps translate natural language questions into Cypher queries."
+                            )
                         ),
-                    )
-                ],
-            )
+                        PromptMessage(
+                            role="user",
+                            content=TextContent(
+                                type="text",
+                                text=f"Please create a Cypher query to answer this question: {question}"
+                            )
+                        )
+                    ]
+                )
+
+            elif prompt_name == "relationship-analysis":
+                max_depth = arguments.get("max_depth", 3)
+                return GetPromptResult(
+                    messages=[
+                        PromptMessage(
+                            role="system",
+                            content=TextContent(
+                                type="text",
+                                text="You are a graph relationship analyst that helps understand connections between nodes."
+                            )
+                        ),
+                        PromptMessage(
+                            role="user",
+                            content=TextContent(
+                                type="text",
+                                text=f"""Analyze the relationships between node {arguments['start_node']} 
+                                        and node {arguments['end_node']} up to depth {max_depth}. 
+                                        Consider all possible paths and relationship types."""
+                            ) 
+                        )   
+                    ]
+                )
+
+            elif prompt_name == "schema-suggestion":
+                focus_area = arguments.get("focus_area", "full schema")
+                return GetPromptResult(
+                    messages=[
+                        PromptMessage(
+                            role="system",
+                            content=TextContent(
+                                type="text",
+                                text="You are a Neo4j schema optimization expert.",
+                            ),
+                        ),
+                        PromptMessage(
+                            role="user",
+                            content=TextContent(
+                                type="text",
+                                text=f"Analyze the current schema patterns for {focus_area} and suggest optimizations considering:\n"
+                                "1. Index usage\n"
+                                "2. Relationship types and directions\n"
+                                "3. Property placement\n"
+                                "4. Query patterns",
+                            ),
+                        ),
+                    ]
+                )
+
+            elif prompt_name == "query-optimization":
+                return GetPromptResult(
+                    messages=[
+                        PromptMessage(
+                            role="system",
+                            content=TextContent(
+                                type="text",
+                                text="You are a Neo4j query optimization expert."
+                            )
+                        ),
+                        PromptMessage(
+                            role="user",
+                            content=TextContent(
+                                type="text",
+                                text=f"""Analyze and optimize this Cypher query:\n\n{arguments['query']}\n\n
+                                        Additional context: {arguments.get('context', 'No additional context provided')}\n\n
+                                        Consider:\n
+                                        1. Index usage\n
+                                        2. Query pattern efficiency\n
+                                        3. Memory usage\n
+                                        4. Potential bottlenecks"""
+                            )
+                        )
+                    ]
+                )
+
+            raise ValueError("Prompt implementation not found")
 
         @server.list_tools()
         async def handle_list_tools() -> list[Tool]:
