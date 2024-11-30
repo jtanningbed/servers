@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from neo4j import AsyncDriver
 import logging
-from ..resources.query_templates import QUERY_TEMPLATES, QueryTemplate
+from ..resources.templates import QUERY_TEMPLATES, QueryTemplate
 from ..validation.schema_validator import SchemaValidator
 
 logger = logging.getLogger(__name__)
