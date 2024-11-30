@@ -91,6 +91,31 @@ class SchemaDefinition(BaseModel):
     )
 
 
+class SchemaSetupResponse(BaseModel):
+    """Response model for schema setup operations"""
+
+    created_constraints: List[str] = []  # List of successfully created constraints
+    created_indexes: List[str] = []  # List of successfully created indexes
+    created_labels: List[str] = []  # List of successfully created label nodes
+    warnings: List[str] = []  # Any warnings encountered during setup
+    timestamp: datetime = datetime.now()  # When the schema setup was performed
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "created_constraints": [
+                    "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE"
+                ],
+                "created_indexes": [
+                    "CREATE INDEX type IF NOT EXISTS FOR (e:Entity) ON (e.type)"
+                ],
+                "created_labels": ["Entity", "Context"],
+                "warnings": ["Warning: Index 'type' already exists"],
+                "timestamp": "2024-03-15T14:30:00",
+            }
+        }
+
+
 class CypherQuery(BaseModel):
     """Model for executing custom Cypher queries with parameter binding."""
 
@@ -149,6 +174,91 @@ class QueryResponse(BaseModel):
     )
 
 
+class QueryParams(BaseModel):
+    """Parameters for querying the knowledge graph"""
+
+    context: Optional[str] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "context": "technology",
+                }
+            ]
+        }
+    }
+
+
+class ConnectionParams(BaseModel):
+    """Parameters for finding connections between entities"""
+
+    concept_a: str
+    concept_b: str
+    max_depth: int = 3
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"concept_a": "Alice", "concept_b": "Bob", "max_depth": 3}]
+        }
+    }
+
+
+class Fact(BaseModel):
+    """A single fact represented as a subject-predicate-object triple"""
+
+    subject: str
+    predicate: str
+    object: str
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"subject": "Alice", "predicate": "KNOWS", "object": "Bob"},
+                {
+                    "subject": "Neural Networks",
+                    "predicate": "IS_TYPE_OF",
+                    "object": "Machine Learning",
+                },
+                {
+                    "subject": "Python",
+                    "predicate": "USED_FOR",
+                    "object": "Data Science",
+                },
+            ]
+        }
+    }
+
+
+class Facts(BaseModel):
+    """A collection of facts with optional context"""
+
+    context: Optional[str] = None
+    facts: list[Fact]
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "context": "tech_skills",
+                    "facts": [
+                        {
+                            "subject": "Alice",
+                            "predicate": "SKILLED_IN",
+                            "object": "Python",
+                        },
+                        {
+                            "subject": "Python",
+                            "predicate": "USED_IN",
+                            "object": "Data Science",
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+
+
 # Operation Response Models
 class ValidationError(BaseModel):
     """Validation error response"""
@@ -180,6 +290,25 @@ class Path(BaseModel):
     entities: List[Entity]
     relations: List[Relation]
     length: int
+
+
+class StoreFactsResponse(BaseModel):
+    """Response from storing facts in the knowledge graph"""
+
+    stored_facts: list[Fact]
+    context: str
+    total_stored: int
+    created_at: datetime
+
+
+class ConnectionResponse(BaseModel):
+    """Response from finding connections between entities"""
+
+    paths: list[Path]
+    start_entity: str
+    end_entity: str
+    total_paths: int
+
 
 # Example schemas for different use cases
 SOCIAL_NETWORK_SCHEMA = SchemaDefinition(

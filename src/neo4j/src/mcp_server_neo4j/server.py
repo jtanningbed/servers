@@ -17,7 +17,7 @@ import logging
 import json
 from .prompts import PROMPTS
 from .resources import RESOURCES, RESOURCE_TEMPLATES
-from .schemas import (
+from .resources.schemas import (
     Facts,
     QueryParams,
     QueryResponse,
