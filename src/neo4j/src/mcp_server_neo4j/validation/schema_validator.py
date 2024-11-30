@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 class SchemaValidationError(Exception):
     """Custom exception for schema validation errors"""
-    pass
+    logger.error("Schema validation error")
 
 class SchemaValidator:
     """Validates Neo4j schema operations and ensures consistency"""
@@ -15,6 +15,17 @@ class SchemaValidator:
     def __init__(self, driver: AsyncDriver):
         self.driver = driver
         
+    async def initialize(self):
+        """Initialize the schema validator"""
+        # Verify we can read schema information
+        async with self.driver.session() as session:
+            try:
+                await session.run("CALL db.schema.visualization()")
+                logger.info("Schema validator initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize schema validator: {e}")
+                raise
+            
     async def get_current_schema(self) -> Dict:
         """Fetch current database schema information"""
         async with self.driver.session() as session:

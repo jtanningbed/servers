@@ -4,6 +4,7 @@ from neo4j import AsyncDriver
 import logging
 from ..resources.templates import QUERY_TEMPLATES, QueryTemplate
 from ..validation.schema_validator import SchemaValidator
+from ..resources.schemas import CypherQuery, RelationshipTypeDefinition, QueryResponse
 
 logger = logging.getLogger(__name__)
 
@@ -20,112 +21,90 @@ class TemplateExecutionResponse(BaseModel):
     execution_stats: Optional[Dict[str, Any]] = None
     warnings: List[str] = []
 
+
 class TemplateExecutor:
-    """Executes query templates with validation and customization"""
-
-    def __init__(self, driver: AsyncDriver, validator: SchemaValidator):
+    def __init__(self, driver: AsyncDriver, schema_validator: SchemaValidator):
         self.driver = driver
-        self.validator = validator
+        self.schema_validator = schema_validator
+        self._loaded_templates: Dict[str, QueryTemplate] = {}
 
-    async def execute_template(
-        self,
-        request: TemplateExecutionRequest
-    ) -> TemplateExecutionResponse:
-        """Execute a query template with the given parameters"""
-
-        # Validate template exists
-        if request.template_name not in QUERY_TEMPLATES:
-            raise ValueError(f"Unknown template: {request.template_name}")
-
-        template = QUERY_TEMPLATES[request.template_name]
-
-        # Validate parameters and schema compatibility
-        validation_issues = await self.validator.validate_template_compatibility(
-            request.template_name,
-            template.query,
-            template.required_labels,
-            template.required_relationships
-        )
-
-        # Prepare query
-        query = template.query
-        parameters = request.parameters.copy()
-
-        # Apply customizations if provided
-        if request.customizations:
-            if "additional_where" in request.customizations:
-                # Add custom WHERE clauses
-                where_clause = request.customizations["additional_where"]
-                if "WHERE" in query:
-                    query = query.replace(
-                        "WHERE",
-                        f"WHERE {where_clause} AND"
-                    )
-                else:
-                    # Find appropriate place to insert WHERE clause
-                    match_end = query.find(")")
-                    if match_end != -1:
-                        query = (
-                            query[:match_end + 1] +
-                            f"\nWHERE {where_clause}" +
-                            query[match_end + 1:]
-                        )
-
-            if "order_by" in request.customizations:
-                # Add or replace ORDER BY
-                order_by = request.customizations["order_by"]
-                if "ORDER BY" in query:
-                    # Replace existing ORDER BY
-                    query = query[:query.find("ORDER BY")] + f"ORDER BY {order_by}"
-                else:
-                    # Add new ORDER BY before LIMIT if it exists
-                    if "LIMIT" in query:
-                        query = query.replace(
-                            "LIMIT",
-                            f"ORDER BY {order_by}\nLIMIT"
-                        )
-                    else:
-                        query += f"\nORDER BY {order_by}"
-
-            if "limit" in request.customizations:
-                # Add or replace LIMIT
-                limit = request.customizations["limit"]
-                if "LIMIT" in query:
-                    query = query[:query.find("LIMIT")] + f"LIMIT {limit}"
-                else:
-                    query += f"\nLIMIT {limit}"
-
-        # Execute query
+    async def initialize(self):
+        """Initialize the template executor and validate templates against schema"""
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, parameters)
-
-                # Get execution stats if available
-                execution_stats = None
+            # Load and verify templates
+            for name, template in QUERY_TEMPLATES.items():
                 try:
-                    summary = await result.consume()
-                    execution_stats = {
-                        "counters": summary.counters,
-                        "database": summary.database,
-                        "query_type": summary.query_type,
-                        "plan": summary.plan
-                    }
-                except:
-                    pass  # Ignore stats collection errors
+                    # Verify template against schema
+                    if self.schema_validator:
+                        # Validate template compatibility with schema
+                        schema_issues = (
+                            await self.schema_validator.validate_template_compatibility(
+                                name,
+                                template.query,
+                                template.required_labels,
+                                template.required_relationships,
+                            )
+                        )
+                        if schema_issues:
+                            logger.warning(
+                                f"Template {name} has schema compatibility issues: {schema_issues}"
+                            )
+                            continue
 
-                # Get results
-                data = await result.data()
+                    # Verify query syntax
+                    async with self.driver.session() as session:
+                        # Create dummy parameters based on parameter descriptions
+                        dummy_params = self._create_dummy_params(template)
+                        await session.run(f"EXPLAIN {template.query}", dummy_params)
+                        self._loaded_templates[name] = template
+                        logger.info(f"Successfully loaded template: {name}")
+                except Exception as e:
+                    logger.warning(f"Failed to validate template {name}: {e}")
 
-                return TemplateExecutionResponse(
-                    results=data,
-                    template_used=request.template_name,
-                    execution_stats=execution_stats,
-                    warnings=validation_issues
-                )
-
+            logger.info(
+                f"Template executor initialized with {len(self._loaded_templates)} valid templates"
+            )
         except Exception as e:
-            logger.error(f"Template execution error: {str(e)}")
+            logger.error(f"Failed to initialize template executor: {e}")
             raise
+
+    def _create_dummy_params(self, template: QueryTemplate) -> Dict[str, Any]:
+        """Create dummy parameters for template validation"""
+        dummy_params = {}
+        for param_name, param_desc in template.parameter_descriptions.items():
+            # Basic type inference from description
+            if "number" in param_desc.lower() or "count" in param_desc.lower():
+                dummy_params[param_name] = 0
+            elif "date" in param_desc.lower():
+                dummy_params[param_name] = "2024-01-01"
+            elif "list" in param_desc.lower() or "array" in param_desc.lower():
+                dummy_params[param_name] = []
+            else:
+                dummy_params[param_name] = "dummy_value"
+        return dummy_params
+
+    async def execute(
+        self, template_name: str, parameters: Dict[str, Any]
+    ) -> QueryResponse:
+        """Execute a template with the given parameters"""
+        if template_name not in self._loaded_templates:
+            raise ValueError(f"Template {template_name} not found or failed validation")
+
+        template = self._loaded_templates[template_name]
+
+        # Additional parameter validation if needed
+        if self.schema_validator:
+            await self.schema_validator.validate_template_parameters(
+                template_name, parameters
+            )
+
+        async with self.driver.session() as session:
+            result = await session.run(template.query, parameters)
+            data = await result.data()
+
+            return QueryResponse(
+                results=data, total_results=len(data), template_used=template_name
+            )
 
 
 class QueryBuilder:
@@ -139,7 +118,7 @@ class QueryBuilder:
         )
 
     @staticmethod
-    def create_relationship_query(rel_def: RelationshipDefinition) -> CypherQuery:
+    def create_relationship_query(rel_def: RelationshipTypeDefinition) -> CypherQuery:
         """Build a query to create a relationship"""
         return CypherQuery.from_template(
             "relationship_creation",

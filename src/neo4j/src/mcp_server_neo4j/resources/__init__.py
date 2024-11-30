@@ -1,3 +1,6 @@
+from mcp.types import Resource, ResourceTemplate
+from pydantic import AnyUrl
+
 # Cypher query standard resources
 RESOURCES: dict[str, list[Resource]] = {
     # Schema resources
@@ -79,25 +82,25 @@ TEMPLATE_RESOURCES = {
     "contents": [
         Resource(
             uri=AnyUrl("neo4j://templates/queries"),
-            title="Available Query Templates",
+            name="Available Query Templates",
             description="List of pre-defined Cypher query templates with examples and validation rules",
             mime_type="application/json",
         ),
         Resource(
             uri=AnyUrl("neo4j://templates/schemas"),
-            title="Schema Templates",
+            name="Schema Templates",
             description="Example schema definitions for common use cases",
             mime_type="application/json",
         ),
         Resource(
             uri=AnyUrl("neo4j://templates/analytics"),
-            title="Analytics Templates",
+            name="Analytics Templates",
             description="Templates for common graph analytics patterns",
             mime_type="application/json",
         ),
         Resource(
             uri=AnyUrl("neo4j://templates/recommendations"),
-            title="Recommendation Templates",
+            name="Recommendation Templates",
             description="Templates for building recommendation systems",
             mime_type="application/json",
         ),
@@ -107,14 +110,14 @@ TEMPLATE_RESOURCES = {
 TEMPLATE_RESOURCE_TEMPLATES = {
     "contents": [
         ResourceTemplate(
-            uri_template="neo4j://templates/queries/{/category}",
-            title="Query Templates by Category",
+            uriTemplate="neo4j://templates/queries/{/category}",
+            name="Query Templates by Category",
             description="Access query templates filtered by category",
             mime_type="application/json",
         ),
         ResourceTemplate(
-            uri_template="neo4j://templates/schemas/{/domain}",
-            title="Domain-Specific Schema Templates",
+            uriTemplate="neo4j://templates/schemas/{/domain}",
+            name="Domain-Specific Schema Templates",
             description="Access schema templates for specific domains",
             mime_type="application/json",
         ),

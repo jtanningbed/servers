@@ -22,10 +22,14 @@ from .schemas import (
     QueryResponse as GraphQueryResponse,
     ConnectionResponse,
     Path,
+    SchemaDefinition, 
+    SchemaSetupResponse,
+    NodeLabelDefinition,
     # Enhanced operation schemas
     CypherQuery,
     ValidationError
 )
+from ..tools.template_executor import TemplateExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,7 @@ class ResourceHandler:
     ):
         self.driver = driver
         self.schema_validator = schema_validator
-        self.template_executor = template_executor
+        self.template_executor = TemplateExecutor(driver, schema_validator)
         self._resources = {**RESOURCES, **TEMPLATE_RESOURCES}
         self._resource_templates = {**RESOURCE_TEMPLATES, **TEMPLATE_RESOURCE_TEMPLATES}
 
@@ -67,32 +71,51 @@ class ResourceHandler:
         response = SchemaSetupResponse()
 
         async with self.driver.session() as session:
-            # Create constraints
-            for constraint in schema.constraints:
-                try:
-                    await session.run(constraint)
-                    response.created_constraints.append(constraint)
-                except Exception as e:
-                    response.warnings.append(f"Error creating constraint: {str(e)}")
+            # Create uniqueness constraints and indexes for properties
+            for node in schema.node_labels:
+                for prop in node.properties:
+                    if prop.required:
+                        # Instead of existence constraint, create uniqueness if specified
+                        if prop.unique:
+                            constraint = f"""
+                            CREATE CONSTRAINT {node.label.lower()}_{prop.name}_unique 
+                            IF NOT EXISTS FOR (n:{node.label}) 
+                            REQUIRE n.{prop.name} IS UNIQUE
+                            """
+                            try:
+                                await session.run(constraint)
+                                response.created_constraints.append(constraint)
+                            except Exception as e:
+                                response.warnings.append(
+                                    f"Error creating constraint: {str(e)}"
+                                )
 
-            # Create indices
-            for index in schema.indices:
-                try:
-                    await session.run(index)
-                    response.created_indexes.append(index)
-                except Exception as e:
-                    response.warnings.append(f"Error creating index: {str(e)}")
+                    if prop.indexed:
+                        index = f"""
+                        CREATE INDEX {node.label.lower()}_{prop.name}_idx
+                        IF NOT EXISTS FOR (n:{node.label}) ON (n.{prop.name})
+                        """
+                        try:
+                            await session.run(index)
+                            response.created_indexes.append(index)
+                        except Exception as e:
+                            response.warnings.append(f"Error creating index: {str(e)}")
 
-            # Create label nodes
+            # Create label nodes with metadata (this is just internal bookkeeping)
             for label_def in schema.node_labels:
                 try:
                     query = """
                     MERGE (l:NodeLabel {name: $name})
-                    SET l.description = $description
+                    SET l.description = $description,
+                        l.properties = $properties
                     """
                     await session.run(
                         query,
-                        {"name": label_def.label, "description": label_def.description},
+                        {
+                            "name": label_def.label,
+                            "description": label_def.description,
+                            "properties": [p.model_dump() for p in label_def.properties],
+                        },
                     )
                     response.created_labels.append(label_def.label)
                 except Exception as e:
@@ -100,7 +123,6 @@ class ResourceHandler:
                         f"Error creating label node {label_def.label}: {str(e)}"
                     )
 
-        # Record setup timestamp
         response.timestamp = datetime.now()
         return response
 
@@ -345,19 +367,14 @@ class ResourceHandler:
                     from_entity=Entity(**r["relation"]["from_entity"]),
                     to_entity=Entity(**r["relation"]["to_entity"]),
                     relation_type=r["relation"]["relation_type"],
-                    context=r["relation"]["context"],
-                    created_at=(r["relation"]["created_at"].to_native() 
-                              if hasattr(r["relation"]["created_at"], "to_native") 
-                              else r["relation"]["created_at"]) if r["relation"]["created_at"] else None,
+                    context=r["relation"]["context"],   
                     created_at=(
-                        (
-                            r["relation"]["created_at"].to_native()
-                            if hasattr(r["relation"]["created_at"], "to_native")
-                            else r["relation"]["created_at"]
-                        )
-                        if r["relation"]["created_at"]
-                        else None
-                    ),
+                        r["relation"]["created_at"].to_native()
+                        if hasattr(r["relation"]["created_at"], "to_native")
+                        else r["relation"]["created_at"]
+                    )
+                    if r["relation"]["created_at"]
+                    else None,
                 )
                 for r in data
             ]

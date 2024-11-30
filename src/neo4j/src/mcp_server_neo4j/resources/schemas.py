@@ -3,7 +3,7 @@ Schema definitions and models for Neo4j database.
 Consolidates schemas from schema.py, schemas.py, and examples.py.
 """
 from typing import Dict, List, Optional, Any, Set
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from enum import Enum
 from datetime import datetime
 
@@ -28,24 +28,29 @@ class IndexType(str, Enum):
     RANGE = "RANGE"
     FULLTEXT = "FULLTEXT"
 
+
 class PropertyDefinition(BaseModel):
     """Definition for a node or relationship property"""
+
     name: str = Field(..., description="Name of the property")
     type: PropertyType = Field(..., description="Data type of the property")
-    required: bool = Field(default=False, description="Whether the property is required")
-    indexed: bool = Field(default=False, description="Whether to create an index on this property")
-    index_type: Optional[IndexType] = Field(
-        default=None,
-        description="Type of index to create if indexed is True"
+    required: bool = Field(
+        default=False,
+        description="Whether the property is required (documentation only)",
     )
-    default: Optional[Any] = Field(
-        default=None,
-        description="Default value for the property"
+    unique: bool = Field(
+        default=False, description="Whether to create a uniqueness constraint"
+    )
+    indexed: bool = Field(
+        default=False, description="Whether to create an index on this property"
+    )
+    index_type: Optional[IndexType] = Field(
+        default=None, description="Type of index to create if indexed is True"
     )
     description: Optional[str] = Field(
-        default=None,
-        description="Description of what this property represents"
+        default=None, description="Description of what this property represents"
     )
+
 
 class NodeLabelDefinition(BaseModel):
     """Definition for a node label and its properties"""

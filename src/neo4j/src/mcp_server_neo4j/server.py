@@ -15,7 +15,7 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 from dotenv import load_dotenv
 import logging
 import json
-from .prompts import PROMPTS
+from .resources.prompts import PROMPT_HANDLERS
 from .resources import RESOURCES, RESOURCE_TEMPLATES
 from .resources.schemas import (
     Facts,
@@ -29,11 +29,11 @@ from .resources.schemas import (
     Entity, 
     Path,
     Neo4jError,
-    ValidationError
+    ValidationError, 
+    CypherQuery, 
+    QueryResponse as EnhancedQueryResponse
 )
-from .queries import CypherQuery, QueryResponse as EnhancedQueryResponse
 from .resources.schemas import (
-    generate_schema_setup_queries,
     SchemaDefinition
 )
 from .resources.handlers import ResourceHandler
@@ -67,11 +67,56 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 from .resources.schemas import (
     SchemaDefinition,
     SchemaSetupResponse,
+    RelationshipTypeDefinition,
     NodeLabelDefinition,
+    PropertyDefinition, 
+    PropertyType
 )
 from .validation.schema_validator import SchemaValidator
 from .tools.template_executor import TemplateExecutor
 
+# server.py
+
+# Update the EXAMPLE_SCHEMA to use proper SchemaDefinition
+EXAMPLE_SCHEMA = SchemaDefinition(
+    node_labels=[
+        NodeLabelDefinition(
+            label="Person",
+            description="A person node",
+            properties=[
+                PropertyDefinition(
+                    name="name",
+                    type=PropertyType.STRING,
+                    unique=True,  # Use unique instead of just required
+                    indexed=True,
+                    description="Person's name",
+                ),
+                PropertyDefinition(
+                    name="age",
+                    type=PropertyType.INTEGER,
+                    indexed=True,
+                    description="Person's age",
+                ),
+            ],
+        )
+    ],
+    relationship_types=[
+        RelationshipTypeDefinition(
+            type="KNOWS",
+            source_labels=["Person"],
+            target_labels=["Person"],
+            properties=[
+                PropertyDefinition(
+                    name="since",
+                    type=PropertyType.DATETIME,
+                    required=True,  # This is just for documentation now
+                    description="When the relationship was established",
+                )
+            ],
+            description="Represents a connection between people",
+        )
+    ],
+)
 
 class Neo4jServer(Server):
     def __init__(self):
@@ -85,7 +130,7 @@ class Neo4jServer(Server):
 
         # Initialize components
         schema_validator = SchemaValidator(self.driver)
-        template_executor = TemplateExecutor(self.driver)
+        template_executor = TemplateExecutor(self.driver, schema_validator)
 
         # Initialize resource handler with components
         self.resource_handler = ResourceHandler(
@@ -138,7 +183,7 @@ async def serve(uri: str, username: str, password: str) -> None:
         @server.list_prompts()
         async def handle_list_prompts() -> list[Prompt]:
             """list available prompts"""
-            return list(PROMPTS.values())
+            return list(PROMPT_HANDLERS.items())
 
         @server.get_prompt()
         async def handle_get_prompt(
@@ -151,7 +196,6 @@ async def serve(uri: str, username: str, password: str) -> None:
         async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             """Handle tool invocation with proper response formatting"""
             return await server.resource_handler.handle_call_tool(name, arguments)
-
 
         from mcp.server.stdio import stdio_server
         async with stdio_server() as (read_stream, write_stream):

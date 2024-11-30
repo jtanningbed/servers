@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime
 import pytest_asyncio
 from neo4j import AsyncDriver, AsyncSession
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from mcp.types import Resource, Tool, Prompt, TextContent
 from mcp_server_neo4j.server import Neo4jServer, StoreFactsResponse, Relation, Entity, Facts, Fact, ConnectionResponse, ConnectionParams, QueryResponse, QueryParams, Path
 
